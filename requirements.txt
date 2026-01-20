@@ -1,0 +1,12 @@
+requests
+numpy
+xarray
+beautifulsoup4
+cfgrib
+eccodes
+netCDF4
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+ecmwf-opendata
