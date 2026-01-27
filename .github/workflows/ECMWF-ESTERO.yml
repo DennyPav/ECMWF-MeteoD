@@ -1,0 +1,82 @@
+name: ECMWF MeteoD
+
+on:
+  schedule:
+    - cron: "45 7 * * *"
+    - cron: "45 19 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-bollettino:
+    runs-on: ubuntu-latest
+    env:
+      LC_ALL: it_IT.UTF-8
+      LANG: it_IT.UTF-8
+      LANGUAGE: it_IT.UTF-8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: Setup rclone config from secret
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p /home/runner/.config/rclone
+          echo "${RCLONE_CONFIG}" > /home/runner/.config/rclone/rclone.conf
+          chmod 600 /home/runner/.config/rclone/rclone.conf
+
+      - name: Run ICON2I pipeline and upload
+        run: |
+          set -e
+
+          # ===============================
+          # Determina data e run corretti
+          # ===============================
+          NOW_HOUR=$(date -u +%H)
+
+          if [ "$NOW_HOUR" -lt 7 ]; then
+            DATE=$(date -u -d "yesterday" +%Y%m%d)
+            RUN=12
+          elif [ "$NOW_HOUR" -lt 19 ]; then
+            DATE=$(date -u +%Y%m%d)
+            RUN=00
+          else
+            DATE=$(date -u +%Y%m%d)
+            RUN=12
+          fi
+
+
+          RUN_FOLDER="${DATE}${RUN}"
+          LOCAL_DIR="./${RUN_FOLDER}"
+          REMOTE_DIR="gd_personal:MeteoD/ECMWF/${RUN_FOLDER}"
+
+          # ===============================
+          # Creazione della cartella remota
+          # ===============================
+          rclone mkdir "$REMOTE_DIR" || true
+
+          # ===============================
+          # Esecuzione pipeline principale
+          # ===============================
+          python ecmwf-run-estero.py
+
+          # ===============================
+          # Upload finale con statistiche
+          # ===============================
+          rclone copy "$LOCAL_DIR" "$REMOTE_DIR" --drive-chunk-size 64M --ignore-existing --verbose || true
+
+          echo "✅ Upload finale completato"
