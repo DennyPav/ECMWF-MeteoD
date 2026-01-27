@@ -1,4 +1,4 @@
-name: ECMWF MeteoD
+name: ECMWF MeteoD - ESTERO
 
 on:
   schedule:
