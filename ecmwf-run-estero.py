@@ -69,7 +69,7 @@ def get_run_datetime_now_utc():
     return now.strftime("%Y%m%d"), "12"
 
 # ---------------------- FUNZIONI PER DOWNLOAD E RITAGLIO ----------------------
-def convert_grib_global_xarray(infile):
+def crop_grib_italy_xarray(infile):
     """
     Converte un file GRIB globale in NetCDF mantenendo l'intero dominio.
     """
