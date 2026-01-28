@@ -63,7 +63,7 @@ def wet_bulb_celsius(t_c, rh_percent):
 def get_run_datetime_now_utc():
     now = datetime.now(timezone.utc)
     if now.hour < 6:
-        return (now - timedelta(days=1)).strftime("%Y%m%d"), "00"
+        return (now - timedelta(days=1)).strftime("%Y%m%d"), "12"
     elif now.hour < 18:
         return now.strftime("%Y%m%d"), "00"
     return now.strftime("%Y%m%d"), "12"
