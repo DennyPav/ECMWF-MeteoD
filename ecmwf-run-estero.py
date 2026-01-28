@@ -70,25 +70,14 @@ def get_run_datetime_now_utc():
 
 # ---------------------- FUNZIONI PER DOWNLOAD E RITAGLIO ----------------------
 def crop_grib_italy_xarray(infile):
-    """
-    Converte un file GRIB globale in NetCDF mantenendo l'intero dominio.
-    """
-    # Apre il dataset. chunks={} abilita Dask per gestire file grandi senza caricare tutto in RAM
-    ds = xr.open_dataset(infile, engine="cfgrib", chunks={}) 
-    
-    # Rimosso il passaggio .sel() per mantenere il dominio globale (0-360 o -180/180)
-    # Se vuoi esplicitare i bordi (es. per sicurezza), vedi nota sotto.
+    # Rimosso chunks={} -> carica tutto subito in RAM usando NumPy standard
+    ds = xr.open_dataset(infile, engine="cfgrib") 
     
     outfile = infile.replace(".grib", ".nc")
-    
-    # Salva in NetCDF.
-    # L'opzione compute=True forza l'esecuzione se si usa Dask, altrimenti to_netcdf lo fa da solo.
     ds.to_netcdf(outfile)
-    
-    # Chiude esplicitamente (buona pratica con i file GRIB che a volte restano lockati)
     ds.close()
-    
     return outfile
+
 
 def download_ecmwf_triorario(run_date, run_hour):
     steps_tri = list(range(0, 144, 3))
