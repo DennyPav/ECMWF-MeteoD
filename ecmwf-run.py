@@ -167,26 +167,29 @@ def altitude_correction(t2m, rh, z_model, z_station, pmsl):
 # ---------------------- CLASSIFICAZIONE METEO ----------------------
 def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, timestep_hours=3):
     
-    # Pre-calcoli comuni
-    wet_bulb = wet_bulb_celsius(t2m, rh2m)
-    prec_type_high = "NEVE" if wet_bulb < 0.5 else "PIOGGIA"
-    prec_type_low = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
-    
+    # --- MODIFICA: Calcolo stato nuvoloso SPOSTATO ALL'INIZIO ---
     octas = clct / 100.0 * 8
     if octas <= 2: cloud_state = "SERENO"
     elif octas <= 4: cloud_state = "POCO NUVOLOSO"
     elif octas <= 6: cloud_state = "NUVOLOSO"
     else: cloud_state = "COPERTO"
+    # ------------------------------------------------------------
 
+    # Pre-calcoli comuni
+    wet_bulb = wet_bulb_celsius(t2m, rh2m)
+    prec_type_high = "NEVE" if wet_bulb < 0.5 else "PIOGGIA"
+    prec_type_low = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
+    
     # Soglie intensità basate su timestep
     if timestep_hours == 3:
         prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 5.0, 20.0
     else: # 6 hours
         prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 10.0, 30.0
 
-    # 1. TEMPORALE
+    # 1. TEMPORALE (MODIFICA: Ritorna anche il cloud_state)
     if mucape > 400 and tp_rate > 0.5 * timestep_hours:
-        return "TEMPORALE"
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        return f"{cloud_state} TEMPORALE"
     
     # 2. PRECIPITAZIONE ALTA (> 0.9 mm)
     if tp_rate > 0.9:
@@ -206,29 +209,28 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
     # Recupero soglie dinamiche
     fog_rh = season_thresh.get("fog_rh", 95)
     fog_wd = season_thresh.get("fog_wind", 8)
-    fog_t  = season_thresh.get("fog_max_t", 18) # Default 18 se manca la chiave
+    fog_t  = season_thresh.get("fog_max_t", 18) 
     
     haze_rh = season_thresh.get("haze_rh", 85)
     haze_wd = season_thresh.get("haze_wind", 12)
 
     # 4. PRECIPITAZIONE BASSISSIMA (0.1 - 0.5 mm) -> Priorità Nebbia
     if 0.1 <= tp_rate < 0.5:
-        # Priorità NEBBIA/FOSCHIA (con T < soglia stagionale)
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
         
-        # Se no nebbia -> Precipitazione debolissima
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} {prec_type_low}"
 
     # 5. NESSUNA PRECIPITAZIONE (< 0.1 mm)
-    elif tp_rate < 0.1: # else implicito
+    elif tp_rate < 0.1: 
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
         
         return cloud_state
         
     return cloud_state
+
 
 # ---------------------- CARICAMENTO COMUNI ----------------------
 def load_venues(file_path):
@@ -257,9 +259,15 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         snow_steps = 0
         rain_steps = 0
         has_significant_snow_or_rain = False
+        has_storm = False # --- MODIFICA: Nuovo flag ---
         
         for r in recs:
             wtxt = r.get("w", "")
+            
+            # --- MODIFICA: Controllo Temporale ---
+            if "TEMPORALE" in wtxt:
+                has_storm = True
+
             # Ignora pioggerella/nevischio: considera solo PIOGGIA/NEVE
             if "PIOGGIA" in wtxt or "NEVE" in wtxt:
                 has_significant_snow_or_rain = True
@@ -280,8 +288,13 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         
         weather_str = c_state
         
-        # Aggiungi PIOGGIA/NEVE solo se c'è stata almeno un passo con stato significativo
-        if has_significant_snow_or_rain:
+        # --- MODIFICA: Priorità al TEMPORALE ---
+        if has_storm:
+            if c_state == "SERENO": c_state = "POCO NUVOLOSO"
+            weather_str = f"{c_state} TEMPORALE"
+            
+        # Aggiungi PIOGGIA/NEVE solo se c'è stata almeno un passo con stato significativo (e no temporale)
+        elif has_significant_snow_or_rain:
             ptype = "NEVE" if is_snow_day else "PIOGGIA"
             if tp_tot >= 30: pint = "INTENSA"
             elif tp_tot >= 10: pint = "MODERATA"
@@ -296,6 +309,7 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         })
         
     return daily
+
 
 
 # ---------------------- PROCESSAMENTO ----------------------
