@@ -45,10 +45,13 @@ jobs:
       # ---------------------------------------------------------
       - name: Install & Setup rclone
         if: success()
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: |
           curl https://rclone.org/install.sh | sudo bash
           mkdir -p /home/runner/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG }}" > /home/runner/.config/rclone/rclone.conf
+          # Usa la variabile d'ambiente
+          echo "${RCLONE_CONFIG}" > /home/runner/.config/rclone/rclone.conf
           chmod 600 /home/runner/.config/rclone/rclone.conf
 
       # ---------------------------------------------------------
