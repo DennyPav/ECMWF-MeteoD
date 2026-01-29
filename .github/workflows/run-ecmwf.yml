@@ -28,24 +28,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install rclone
-        run: curl https://rclone.org/install.sh | sudo bash
-
-      - name: Setup rclone config from secret
+      # ---------------------------------------------------------
+      # 1. ESECUZIONE SCRIPT PYTHON (Genera file + Upload R2)
+      # ---------------------------------------------------------
+      - name: Run ECMWF pipeline
         env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          # Le chiavi R2 servono qui allo script Python
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
+          python ecmwf-run.py
+
+      # ---------------------------------------------------------
+      # 2. SETUP RCLONE (Eseguito solo se Python ha successo)
+      # ---------------------------------------------------------
+      - name: Install & Setup rclone
+        if: success()
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
           mkdir -p /home/runner/.config/rclone
-          echo "${RCLONE_CONFIG}" > /home/runner/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" > /home/runner/.config/rclone/rclone.conf
           chmod 600 /home/runner/.config/rclone/rclone.conf
 
-      - name: Run ICON2I pipeline and upload
+      # ---------------------------------------------------------
+      # 3. UPLOAD GOOGLE DRIVE
+      # ---------------------------------------------------------
+      - name: Upload to Google Drive
+        if: success()
         run: |
-          set -e
-
-          # ===============================
-          # Determina data e run corretti
-          # ===============================
+          # Logica per determinare la cartella
           NOW_HOUR=$(date -u +%H)
 
           if [ "$NOW_HOUR" -lt 7 ]; then
@@ -59,24 +71,16 @@ jobs:
             RUN=12
           fi
 
-
           RUN_FOLDER="${DATE}${RUN}"
           LOCAL_DIR="./${RUN_FOLDER}"
           REMOTE_DIR="gd_personal:MeteoD/ECMWF/${RUN_FOLDER}"
 
-          # ===============================
-          # Creazione della cartella remota
-          # ===============================
+          echo "🚀 Starting upload for: $RUN_FOLDER"
+
+          # Creazione cartella remota
           rclone mkdir "$REMOTE_DIR" || true
 
-          # ===============================
-          # Esecuzione pipeline principale
-          # ===============================
-          python ecmwf-run.py
+          # Upload finale
+          rclone copy "$LOCAL_DIR" "$REMOTE_DIR" --drive-chunk-size 64M --ignore-existing --verbose
 
-          # ===============================
-          # Upload finale con statistiche
-          # ===============================
-          rclone copy "$LOCAL_DIR" "$REMOTE_DIR" --drive-chunk-size 64M --ignore-existing --verbose || true
-
-          echo "✅ Upload finale completato"
+          echo "✅ Upload Google Drive completato"
