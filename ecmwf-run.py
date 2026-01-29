@@ -5,10 +5,17 @@ import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta, timezone
 from ecmwf.opendata import Client
+import boto3  # <--- NUOVO IMPORT
 
 # ---------------------- CONFIGURAZIONE ----------------------
 WORKDIR = os.getcwd()
 VENUES_PATH = f"{WORKDIR}/comuni_italia_all.json"
+
+# --- CONFIGURAZIONE R2 (Da Secrets) ---
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
+R2_BUCKET_NAME = "json-meteod"  # Lo stesso bucket di ICON
 
 # Lapse rates
 LAPSE_DRY = 0.0098
@@ -17,34 +24,59 @@ LAPSE_P = 0.012
 
 # SOGLIE STAGIONALI
 SEASON_THRESHOLDS = {
-    "winter": {
-        "start_day": 1, "end_day": 80, 
-        "fog_rh": 96, "haze_rh": 85, 
-        "fog_wind": 7.0, "haze_wind": 12.0,
-        "fog_max_t": 15.0
-    },
-    "spring": {
-        "start_day": 81, "end_day": 172, 
-        "fog_rh": 97, "haze_rh": 85, 
-        "fog_wind": 6.0, "haze_wind": 10.0,
-        "fog_max_t": 20.0
-    },
-    "summer": {
-        "start_day": 173, "end_day": 263, 
-        "fog_rh": 98, "haze_rh": 90, 
-        "fog_wind": 4.0, "haze_wind": 9.0,
-        "fog_max_t": 26.0
-    },
-    "autumn": {
-        "start_day": 264, "end_day": 365, 
-        "fog_rh": 95, "haze_rh": 88, 
-        "fog_wind": 7.0, "haze_wind": 11.0,
-        "fog_max_t": 20.0
-    }
+    "winter": {"start_day": 1, "end_day": 80, "fog_rh": 96, "haze_rh": 85, "fog_wind": 7.0, "haze_wind": 12.0, "fog_max_t": 15.0},
+    "spring": {"start_day": 81, "end_day": 172, "fog_rh": 97, "haze_rh": 85, "fog_wind": 6.0, "haze_wind": 10.0, "fog_max_t": 20.0},
+    "summer": {"start_day": 173, "end_day": 263, "fog_rh": 98, "haze_rh": 90, "fog_wind": 4.0, "haze_wind": 9.0, "fog_max_t": 26.0},
+    "autumn": {"start_day": 264, "end_day": 365, "fog_rh": 95, "haze_rh": 88, "fog_wind": 7.0, "haze_wind": 11.0, "fog_max_t": 20.0}
 }
 
 CET = timezone(timedelta(hours=1))
 CEST = timezone(timedelta(hours=2))
+
+# ---------------------- R2 FUNCTIONS (NUOVE) ----------------------
+def get_r2_client():
+    if not R2_ACCESS_KEY or not R2_SECRET_KEY or not R2_ENDPOINT:
+        # Silenzioso se mancano le chiavi (es. test locale senza env)
+        return None
+    return boto3.client(
+        's3',
+        endpoint_url=R2_ENDPOINT,
+        aws_access_key_id=R2_ACCESS_KEY,
+        aws_secret_access_key=R2_SECRET_KEY,
+        region_name='auto'
+    )
+
+def upload_to_r2(local_file_path, run_date, run_hour, comune_name):
+    """
+    Carica file su R2 nella cartella ECMWF.
+    Struttura: ECMWF/YYYYMMDDRR/comune_ecmwf.json
+    """
+    s3 = get_r2_client()
+    if not s3: return False
+    
+    try:
+        folder_name = f"{run_date}{run_hour}" 
+        # NOTA: Aggiungo '_ecmwf' nel nome file remoto se vuoi distinguerli, 
+        # oppure tieni lo stesso nome del file locale.
+        # Qui uso il nome file locale che hai generato (safe_city + "_ecmwf.json")
+        filename_only = os.path.basename(local_file_path)
+        
+        object_key = f"ECMWF/{folder_name}/{filename_only}"
+        
+        # print(f"[R2] Uploading {object_key}...", flush=True) # Decommenta per debug
+        s3.upload_file(
+            local_file_path,
+            R2_BUCKET_NAME,
+            object_key,
+            ExtraArgs={
+                'ContentType': 'application/json',
+                'CacheControl': 'public, max-age=3600'
+            }
+        )
+        return True
+    except Exception as e:
+        print(f"[R2] ❌ Errore upload {comune_name}: {e}", flush=True)
+        return False
 
 # ---------------------- FUNZIONI UTILI ----------------------
 def utc_to_local(dt_utc):
@@ -70,10 +102,6 @@ def get_run_datetime_now_utc():
 
 # ---------------------- FUNZIONI PER DOWNLOAD E RITAGLIO ----------------------
 def crop_grib_italy_xarray(infile):
-    """
-    Ritaglia un file GRIB globale sulle coordinate dell'Italia
-    e lo salva come NetCDF (più leggero e stabile).
-    """
     ds = xr.open_dataset(infile, engine="cfgrib")
     ds_it = ds.sel(longitude=slice(6,19), latitude=slice(48,35))
     outfile = infile.replace(".grib", ".nc")
@@ -100,7 +128,6 @@ def download_ecmwf_triorario(run_date, run_hour):
         client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc",
                         step=[0], param=["z"], target=orog_file)
 
-    # --- RITAGLIO XARRAY ---
     main_file = crop_grib_italy_xarray(main_file)
     wind_file = crop_grib_italy_xarray(wind_file)
     orog_file = crop_grib_italy_xarray(orog_file)
@@ -121,7 +148,6 @@ def download_ecmwf_esaorario(run_date, run_hour):
         client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc",
                         step=[0], param=["z"], target=orog_file)
 
-    # --- RITAGLIO XARRAY ---
     main_file_esa = crop_grib_italy_xarray(main_file_esa)
     orog_file = crop_grib_italy_xarray(orog_file)
 
@@ -166,71 +192,54 @@ def altitude_correction(t2m, rh, z_model, z_station, pmsl):
 
 # ---------------------- CLASSIFICAZIONE METEO ----------------------
 def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, timestep_hours=3):
-    
-    # --- MODIFICA: Calcolo stato nuvoloso SPOSTATO ALL'INIZIO ---
     octas = clct / 100.0 * 8
     if octas <= 2: cloud_state = "SERENO"
     elif octas <= 4: cloud_state = "POCO NUVOLOSO"
     elif octas <= 6: cloud_state = "NUVOLOSO"
     else: cloud_state = "COPERTO"
-    # ------------------------------------------------------------
 
-    # Pre-calcoli comuni
     wet_bulb = wet_bulb_celsius(t2m, rh2m)
     prec_type_high = "NEVE" if wet_bulb < 0.5 else "PIOGGIA"
     prec_type_low = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
     
-    # Soglie intensità basate su timestep
     if timestep_hours == 3:
         prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 5.0, 20.0
-    else: # 6 hours
+    else:
         prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 10.0, 30.0
 
-    # 1. TEMPORALE (MODIFICA: Ritorna anche il cloud_state)
     if mucape > 400 and tp_rate > 0.5 * timestep_hours:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} TEMPORALE"
     
-    # 2. PRECIPITAZIONE ALTA (> 0.9 mm)
     if tp_rate > 0.9:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
-        
         if tp_rate >= prec_intensa_min: prec_intensity = "INTENSA"
         elif tp_rate >= prec_moderata_min: prec_intensity = "MODERATA"
         else: prec_intensity = "DEBOLE"
-        
         return f"{cloud_state} {prec_type_high} {prec_intensity}"
 
-    # 3. PRECIPITAZIONE MEDIO-BASSA (0.5 - 0.9 mm) -> No Nebbia
     elif 0.5 <= tp_rate <= 0.9:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} {prec_type_low}"
 
-    # Recupero soglie dinamiche
     fog_rh = season_thresh.get("fog_rh", 95)
     fog_wd = season_thresh.get("fog_wind", 8)
     fog_t  = season_thresh.get("fog_max_t", 18) 
-    
     haze_rh = season_thresh.get("haze_rh", 85)
     haze_wd = season_thresh.get("haze_wind", 12)
 
-    # 4. PRECIPITAZIONE BASSISSIMA (0.1 - 0.5 mm) -> Priorità Nebbia
     if 0.1 <= tp_rate < 0.5:
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
-        
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} {prec_type_low}"
 
-    # 5. NESSUNA PRECIPITAZIONE (< 0.1 mm)
     elif tp_rate < 0.1: 
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
-        
         return cloud_state
         
     return cloud_state
-
 
 # ---------------------- CARICAMENTO COMUNI ----------------------
 def load_venues(file_path):
@@ -244,14 +253,12 @@ def load_venues(file_path):
 def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thresh, timestep_hours):
     daily = []
     days_map = {}
-    
     for i, rec in enumerate(records):
         days_map.setdefault(rec["d"], []).append((i, rec))
         
     for d, items in days_map.items():
         idxs = [x[0] for x in items]
         recs = [x[1] for x in items]
-        
         temps = [r["t"] for r in recs]
         t_min, t_max = min(temps), max(temps)
         tp_tot = sum([r["p"] for r in recs])
@@ -259,26 +266,18 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         snow_steps = 0
         rain_steps = 0
         has_significant_snow_or_rain = False
-        has_storm = False # --- MODIFICA: Nuovo flag ---
+        has_storm = False
         
         for r in recs:
             wtxt = r.get("w", "")
-            
-            # --- MODIFICA: Controllo Temporale ---
-            if "TEMPORALE" in wtxt:
-                has_storm = True
-
-            # Ignora pioggerella/nevischio: considera solo PIOGGIA/NEVE
+            if "TEMPORALE" in wtxt: has_storm = True
             if "PIOGGIA" in wtxt or "NEVE" in wtxt:
                 has_significant_snow_or_rain = True
                 wb = wet_bulb_celsius(r["t"], r["r"])
-                if wb < 0.5:
-                    snow_steps += 1
-                else:
-                    rain_steps += 1
+                if wb < 0.5: snow_steps += 1
+                else: rain_steps += 1
         
         is_snow_day = snow_steps > rain_steps
-        
         clct_mean = np.mean(clct_arr[idxs])
         octas = clct_mean / 100.0 * 8
         if octas <= 2: c_state = "SERENO"
@@ -287,19 +286,14 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         else: c_state = "COPERTO"
         
         weather_str = c_state
-        
-        # --- MODIFICA: Priorità al TEMPORALE ---
         if has_storm:
             if c_state == "SERENO": c_state = "POCO NUVOLOSO"
             weather_str = f"{c_state} TEMPORALE"
-            
-        # Aggiungi PIOGGIA/NEVE solo se c'è stata almeno un passo con stato significativo (e no temporale)
         elif has_significant_snow_or_rain:
             ptype = "NEVE" if is_snow_day else "PIOGGIA"
             if tp_tot >= 30: pint = "INTENSA"
             elif tp_tot >= 10: pint = "MODERATA"
             else: pint = "DEBOLE"
-            
             if c_state == "SERENO": c_state = "POCO NUVOLOSO"
             weather_str = f"{c_state} {ptype} {pint}"
             
@@ -307,10 +301,7 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
             "d": d, "tmin": round(t_min,1), "tmax": round(t_max,1), 
             "p": round(tp_tot,1), "w": weather_str
         })
-        
     return daily
-
-
 
 # ---------------------- PROCESSAMENTO ----------------------
 def process_ecmwf_data():
@@ -324,7 +315,6 @@ def process_ecmwf_data():
     main_file_tri, wind_file_tri, orog_file = download_ecmwf_triorario(run_date,run_hour)
     main_file_esa, _ = download_ecmwf_esaorario(run_date,run_hour)
     
-    # CARICAMENTO DATASET NETCDF
     ds_main_tri=xr.open_dataset(main_file_tri)
     ds_wind_tri=xr.open_dataset(wind_file_tri)
     ds_main_esa=xr.open_dataset(main_file_esa)
@@ -345,7 +335,7 @@ def process_ecmwf_data():
             lat_idx_esa=np.abs(ds_main_esa.latitude-info['lat']).argmin()
             lon_idx_esa=np.abs(ds_main_esa.longitude-info['lon']).argmin()
             
-            # ---------------------- TRIORARIO ----------------------
+            # --- TRIORARIO ---
             t2m_k=ds_main_tri["t2m"].isel(latitude=lat_idx_tri,longitude=lon_idx_tri).values
             td2m_k=ds_main_tri["d2m"].isel(latitude=lat_idx_tri,longitude=lon_idx_tri).values
             tcc=ds_main_tri["tcc"].isel(latitude=lat_idx_tri,longitude=lon_idx_tri).values*100
@@ -383,7 +373,7 @@ def process_ecmwf_data():
             
             daily_summaries_tri=calculate_daily_summaries(trihourly_data,tcc,tp_rate,mucape,season_thresh,timestep_hours=3)
             
-            # ---------------------- ESAORARIO ----------------------
+            # --- ESAORARIO ---
             t2m_k_esa=ds_main_esa["t2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
             td2m_k_esa=ds_main_esa["d2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
             tcc_esa=ds_main_esa["tcc"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values*100
@@ -400,8 +390,6 @@ def process_ecmwf_data():
             for i in range(len(t2m_corr_esa)):
                 dt_utc = ref_dt + timedelta(hours=144 + i*6)
                 dt_local = utc_to_local(dt_utc)
-                # NOTA: Per l'esaorario non scarichiamo il vento, passiamo 5.0 km/h fittizio.
-                # Questo rende la nebbia dipendente solo da RH e T.
                 weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
                                            5.0, mucape_esa[i], season_thresh, timestep_hours=6)
                 esaorario_data.append({
@@ -417,7 +405,6 @@ def process_ecmwf_data():
             daily_summaries_esa = calculate_daily_summaries(esaorario_data, tcc_esa, tp_rate_esa,
                                                             mucape_esa, season_thresh, timestep_hours=6)
 
-            # ---------------------- UNIONE DATI ----------------------
             trihourly_all = trihourly_data + esaorario_data
             daily_all = daily_summaries_tri + daily_summaries_esa
 
@@ -433,8 +420,12 @@ def process_ecmwf_data():
             }
 
             safe_city = city.replace("'", " ")
-            with open(f"{outdir}/{safe_city}_ecmwf.json", "w", encoding="utf-8") as f:
+            local_path = f"{outdir}/{safe_city}_ecmwf.json"
+            with open(local_path, "w", encoding="utf-8") as f:
                 json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
+            
+            # --- UPLOAD SU CLOUDFLARE R2 ---
+            upload_to_r2(local_path, run_date, run_hour, safe_city)
 
             processed += 1
             if processed % 50 == 0:
@@ -444,7 +435,6 @@ def process_ecmwf_data():
             print(f"{city}: {e}")
             continue
 
-    # ---------------------- CHIUSURA DATASET ----------------------
     ds_main_tri.close()
     ds_wind_tri.close()
     ds_main_esa.close()
