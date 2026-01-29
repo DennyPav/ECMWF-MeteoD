@@ -313,11 +313,11 @@ def process_ecmwf_data():
     
     # DOWNLOAD + RITAGLIO
     main_file_tri, wind_file_tri, orog_file = download_ecmwf_triorario(run_date,run_hour)
-    main_file_esa, _ = download_ecmwf_esaorario(run_date,run_hour)
+    # main_file_esa, _ = download_ecmwf_esaorario(run_date,run_hour)
     
     ds_main_tri=xr.open_dataset(main_file_tri)
     ds_wind_tri=xr.open_dataset(wind_file_tri)
-    ds_main_esa=xr.open_dataset(main_file_esa)
+    # ds_main_esa=xr.open_dataset(main_file_esa)
     ds_orog=xr.open_dataset(orog_file)
     
     venues=load_venues(VENUES_PATH)
@@ -332,8 +332,8 @@ def process_ecmwf_data():
         try:
             lat_idx_tri=np.abs(ds_main_tri.latitude-info['lat']).argmin()
             lon_idx_tri=np.abs(ds_main_tri.longitude-info['lon']).argmin()
-            lat_idx_esa=np.abs(ds_main_esa.latitude-info['lat']).argmin()
-            lon_idx_esa=np.abs(ds_main_esa.longitude-info['lon']).argmin()
+            # lat_idx_esa=np.abs(ds_main_esa.latitude-info['lat']).argmin()
+            # lon_idx_esa=np.abs(ds_main_esa.longitude-info['lon']).argmin()
             
             # --- TRIORARIO ---
             t2m_k=ds_main_tri["t2m"].isel(latitude=lat_idx_tri,longitude=lon_idx_tri).values
@@ -374,36 +374,36 @@ def process_ecmwf_data():
             daily_summaries_tri=calculate_daily_summaries(trihourly_data,tcc,tp_rate,mucape,season_thresh,timestep_hours=3)
             
             # --- ESAORARIO ---
-            t2m_k_esa=ds_main_esa["t2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
-            td2m_k_esa=ds_main_esa["d2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
-            tcc_esa=ds_main_esa["tcc"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values*100
-            msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
-            tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-            mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            # t2m_k_esa=ds_main_esa["t2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
+            # td2m_k_esa=ds_main_esa["d2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
+            # tcc_esa=ds_main_esa["tcc"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values*100
+            # msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
+            # tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            # mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
 
-            rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
-            t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
-            t2m_corr_esa, pmsl_corr_esa = altitude_correction(t2m_c_esa, rh2m_esa, z_model, info['elev'], msl_esa)
-            tp_rate_esa = np.diff(tp_cum_esa, prepend=tp_cum_esa[0]) * 1000
+            # rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
+            # t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
+            # t2m_corr_esa, pmsl_corr_esa = altitude_correction(t2m_c_esa, rh2m_esa, z_model, info['elev'], msl_esa)
+            # tp_rate_esa = np.diff(tp_cum_esa, prepend=tp_cum_esa[0]) * 1000
 
-            esaorario_data = []
-            for i in range(len(t2m_corr_esa)):
-                dt_utc = ref_dt + timedelta(hours=144 + i*6)
-                dt_local = utc_to_local(dt_utc)
-                weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
-                                           5.0, mucape_esa[i], season_thresh, timestep_hours=6)
-                esaorario_data.append({
-                    "d": dt_local.strftime("%Y%m%d"),
-                    "h": dt_local.strftime("%H"),
-                    "t": round(float(t2m_corr_esa[i]),1),
-                    "r": round(float(rh2m_esa[i])),
-                    "p": round(float(tp_rate_esa[i]),1),
-                    "pr": round(float(pmsl_corr_esa[i])),
-                    "w": weather
-                })
+            # esaorario_data = []
+            # for i in range(len(t2m_corr_esa)):
+            #     dt_utc = ref_dt + timedelta(hours=144 + i*6)
+            #     dt_local = utc_to_local(dt_utc)
+            #     weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
+            #                                5.0, mucape_esa[i], season_thresh, timestep_hours=6)
+            #     esaorario_data.append({
+            #         "d": dt_local.strftime("%Y%m%d"),
+            #         "h": dt_local.strftime("%H"),
+            #         "t": round(float(t2m_corr_esa[i]),1),
+            #         "r": round(float(rh2m_esa[i])),
+            #         "p": round(float(tp_rate_esa[i]),1),
+            #         "pr": round(float(pmsl_corr_esa[i])),
+            #         "w": weather
+            #     })
 
-            daily_summaries_esa = calculate_daily_summaries(esaorario_data, tcc_esa, tp_rate_esa,
-                                                            mucape_esa, season_thresh, timestep_hours=6)
+            # daily_summaries_esa = calculate_daily_summaries(esaorario_data, tcc_esa, tp_rate_esa,
+            #                                                 mucape_esa, season_thresh, timestep_hours=6)
 
             trihourly_all = trihourly_data + esaorario_data
             daily_all = daily_summaries_tri + daily_summaries_esa
@@ -415,8 +415,9 @@ def process_ecmwf_data():
                 "y": info['lon'],
                 "z": info['elev'],
                 "TRIORARIO": trihourly_data,
-                "ESAORARIO": esaorario_data,
-                "GIORNALIERO": daily_all
+                # "ESAORARIO": esaorario_data,
+                # "GIORNALIERO": daily_all
+                "GIORNALIERO": daily_summaries_tri
             }
 
             safe_city = city.replace("'", " ")
@@ -437,7 +438,7 @@ def process_ecmwf_data():
 
     ds_main_tri.close()
     ds_wind_tri.close()
-    ds_main_esa.close()
+    # ds_main_esa.close()
     ds_orog.close()
 
     print(f"Completato {RUN}: {processed}/{len(venues)} città → {outdir}/")
