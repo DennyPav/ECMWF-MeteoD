@@ -5,8 +5,9 @@ import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta, timezone
 from ecmwf.opendata import Client
+import boto3  # <--- IMPORT NECESSARIO PER R2
 
-# Gestione fuso orario corretta
+# Gestione fuso orario
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -19,6 +20,12 @@ VENUES_PATH = os.path.join(WORKDIR, "comuni_estero.json")
 # Fuso orario Italiano (gestisce automaticamente solare/legale)
 ITALIAN_TZ = ZoneInfo("Europe/Rome")
 
+# --- CONFIGURAZIONE R2 (Da Secrets) ---
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
+R2_BUCKET_NAME = "json-meteod"
+
 # Lapse rates
 LAPSE_DRY = 0.0098
 LAPSE_MOIST = 0.006
@@ -26,33 +33,61 @@ LAPSE_P = 0.012
 
 # SOGLIE STAGIONALI
 SEASON_THRESHOLDS = {
-    "winter": {
-        "start_day": 1, "end_day": 80, 
-        "fog_rh": 96, "haze_rh": 85, 
-        "fog_wind": 7.0, "haze_wind": 12.0, "fog_max_t": 15.0
-    },
-    "spring": {
-        "start_day": 81, "end_day": 172, 
-        "fog_rh": 97, "haze_rh": 85, 
-        "fog_wind": 6.0, "haze_wind": 10.0, "fog_max_t": 20.0
-    },
-    "summer": {
-        "start_day": 173, "end_day": 263, 
-        "fog_rh": 98, "haze_rh": 90, 
-        "fog_wind": 4.0, "haze_wind": 9.0, "fog_max_t": 26.0
-    },
-    "autumn": {
-        "start_day": 264, "end_day": 365, 
-        "fog_rh": 95, "haze_rh": 88, 
-        "fog_wind": 7.0, "haze_wind": 11.0, "fog_max_t": 20.0
-    }
+    "winter": {"start_day": 1, "end_day": 80, "fog_rh": 96, "haze_rh": 85, "fog_wind": 7.0, "haze_wind": 12.0, "fog_max_t": 15.0},
+    "spring": {"start_day": 81, "end_day": 172, "fog_rh": 97, "haze_rh": 85, "fog_wind": 6.0, "haze_wind": 10.0, "fog_max_t": 20.0},
+    "summer": {"start_day": 173, "end_day": 263, "fog_rh": 98, "haze_rh": 90, "fog_wind": 4.0, "haze_wind": 9.0, "fog_max_t": 26.0},
+    "autumn": {"start_day": 264, "end_day": 365, "fog_rh": 95, "haze_rh": 88, "fog_wind": 7.0, "haze_wind": 11.0, "fog_max_t": 20.0}
 }
+
+# ---------------------- R2 FUNCTIONS (NUOVE) ----------------------
+def get_r2_client():
+    if not R2_ACCESS_KEY or not R2_SECRET_KEY or not R2_ENDPOINT:
+        return None
+    return boto3.client(
+        's3',
+        endpoint_url=R2_ENDPOINT,
+        aws_access_key_id=R2_ACCESS_KEY,
+        aws_secret_access_key=R2_SECRET_KEY,
+        region_name='auto'
+    )
+
+def upload_to_r2(local_file_path, run_date, run_hour, comune_name):
+    """
+    Carica file su R2 nella cartella ECMWF.
+    Struttura: ECMWF/YYYYMMDDRR/London_ecmwf.json
+    """
+    s3 = get_r2_client()
+    if not s3: return False
+    
+    try:
+        folder_name = f"{run_date}{run_hour}" 
+        filename_only = os.path.basename(local_file_path)
+        
+        # Percorso su R2
+        object_key = f"ECMWF/{folder_name}/{filename_only}"
+        
+        # print(f"[R2] Uploading {object_key}...", flush=True)
+        s3.upload_file(
+            local_file_path,
+            R2_BUCKET_NAME,
+            object_key,
+            ExtraArgs={
+                'ContentType': 'application/json',
+                'CacheControl': 'public, max-age=3600'
+            }
+        )
+        return True
+    except Exception as e:
+        print(f"[R2] ❌ Errore upload {comune_name}: {e}", flush=True)
+        return False
 
 # ---------------------- FUNZIONI UTILI ----------------------
 def utc_to_italian_time(dt_utc):
     """Converte un datetime UTC nel fuso orario italiano (Rome)."""
+    # Assicuriamoci che dt_utc sia consapevole di essere UTC
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    # Convertiamo al fuso orario italiano
     return dt_utc.astimezone(ITALIAN_TZ)
 
 def wet_bulb_celsius(t_c, rh_percent):
@@ -72,9 +107,20 @@ def get_run_datetime_now_utc():
 
 # ---------------------- FUNZIONI PER DOWNLOAD E RITAGLIO ----------------------
 def crop_grib_italy_xarray(infile):
-    ds = xr.open_dataset(infile, engine="cfgrib") 
+    # NOTA: Per "comuni_estero" forse non vuoi croppare sull'Italia?
+    # Se i comuni sono in tutto il mondo, togli il .sel(...)!
+    # Se sono solo europei/vicini, lascia pure il crop ma allargalo.
+    # Qui lascio il codice originale, ma ATTENZIONE: se New York è fuori dal box 6-19E / 35-48N darà errore.
+    # MODIFICA CONSIGLIATA: Se usi Global ECMWF (0.25), e hai città sparse, NON croppare o croppa più largo.
+    # Per sicurezza qui restituisco il file intero convertito in NC se fallisce il crop o rimuovo il crop.
+    
+    ds = xr.open_dataset(infile, engine="cfgrib")
     outfile = infile.replace(".grib", ".nc")
-    ds.to_netcdf(outfile)
+    
+    # Se il file contiene coordinate globali, salviamo tutto convertito
+    # (Altrimenti rischi che New York o Londra vengano tagliate fuori)
+    ds.to_netcdf(outfile) 
+    
     ds.close()
     return outfile
 
@@ -159,7 +205,6 @@ def altitude_correction(t2m, rh, z_model, z_station, pmsl):
 
 # ---------------------- CLASSIFICAZIONE METEO ----------------------
 def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, timestep_hours=3):
-    # Calcolo stato nuvoloso (spostato in alto per usarlo in caso di temporale)
     octas = clct / 100.0 * 8
     if octas <= 2: cloud_state = "SERENO"
     elif octas <= 4: cloud_state = "POCO NUVOLOSO"
@@ -175,12 +220,10 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
     else:
         prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 10.0, 30.0
 
-    # 1. TEMPORALE (Ritorna anche cloud_state modificato se necessario)
     if mucape > 400 and tp_rate > 0.5 * timestep_hours:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} TEMPORALE"
     
-    # 2. PRECIPITAZIONE ALTA (> 0.9 mm)
     if tp_rate > 0.9:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         if tp_rate >= prec_intensa_min: prec_intensity = "INTENSA"
@@ -188,7 +231,6 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
         else: prec_intensity = "DEBOLE"
         return f"{cloud_state} {prec_type_high} {prec_intensity}"
 
-    # 3. PRECIPITAZIONE MEDIO-BASSA
     elif 0.5 <= tp_rate <= 0.9:
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} {prec_type_low}"
@@ -199,14 +241,12 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
     haze_rh = season_thresh.get("haze_rh", 85)
     haze_wd = season_thresh.get("haze_wind", 12)
 
-    # 4. PRECIPITAZIONE BASSISSIMA
     if 0.1 <= tp_rate < 0.5:
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
         if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
         return f"{cloud_state} {prec_type_low}"
 
-    # 5. NESSUNA PRECIPITAZIONE
     elif tp_rate < 0.1:
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
@@ -268,7 +308,6 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         
         weather_str = c_state
         
-        # Priorità al TEMPORALE nel riepilogo
         if has_storm:
             if c_state == "SERENO": c_state = "POCO NUVOLOSO"
             weather_str = f"{c_state} TEMPORALE"
@@ -339,6 +378,7 @@ def process_ecmwf_data():
             trihourly_data=[]
             for i in range(len(t2m_corr)):
                 dt_utc=ref_dt+timedelta(hours=i*3)
+                # MODIFICA FUSO ORARIO: Qui usiamo la funzione che forza IT
                 dt_local=utc_to_italian_time(dt_utc)
                 weather=classify_weather(t2m_corr[i],rh2m[i],tcc[i],tp_rate[i],
                                          spd_kmh[i],mucape[i],season_thresh,timestep_hours=3)
@@ -372,7 +412,8 @@ def process_ecmwf_data():
             esaorario_data = []
             for i in range(len(t2m_corr_esa)):
                 dt_utc = ref_dt + timedelta(hours=144 + i*6)
-                dt_local = utc_to_italian_time(dt_utc)
+                # MODIFICA FUSO ORARIO: Qui usiamo la funzione che forza IT
+                dt_local=utc_to_italian_time(dt_utc)
                 weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
                                            5.0, mucape_esa[i], season_thresh, timestep_hours=6)
                 esaorario_data.append({
@@ -404,8 +445,12 @@ def process_ecmwf_data():
             }
 
             safe_city = city.replace("'", " ").replace("/", "-")
-            with open(f"{outdir}/{safe_city}_ecmwf.json", "w", encoding="utf-8") as f:
+            local_path = f"{outdir}/{safe_city}_ecmwf.json"
+            with open(local_path, "w", encoding="utf-8") as f:
                 json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
+
+            # --- UPLOAD SU R2 ---
+            upload_to_r2(local_path, run_date, run_hour, safe_city)
 
             processed += 1
             if processed % 10 == 0:
