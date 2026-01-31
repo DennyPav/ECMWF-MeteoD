@@ -52,15 +52,14 @@ def get_r2_client():
         region_name='auto'
     )
 
-def upload_to_r2(local_file_path, run_date, run_hour, comune_name):
-    s3 = get_r2_client()
-    if not s3: return False
+def upload_to_r2(s3_client, local_file_path, run_date, run_hour, comune_name):
+    if not s3_client: return False
     try:
         folder_name = f"{run_date}{run_hour}" 
         filename_only = os.path.basename(local_file_path)
         object_key = f"ECMWF/{folder_name}/{filename_only}"
         
-        s3.upload_file(
+        s3_client.upload_file(
             local_file_path,
             R2_BUCKET_NAME,
             object_key,
@@ -153,7 +152,7 @@ def download_ecmwf_triorario(run_date, run_hour):
     return main_file, wind_file, orog_file
 
 def download_ecmwf_esaorario(run_date, run_hour):
-    steps_esa = list(range(144, 331, 6)) if run_hour=="00" else list(range(144, 319, 6))
+    steps_esa = list(range(150, 331, 6)) if run_hour=="00" else list(range(150, 319, 6))
     grib_dir = f"{WORKDIR}/grib_ecmwf/{run_date}{run_hour}"
     os.makedirs(grib_dir, exist_ok=True)
     main_file_esa = f"{grib_dir}/ecmwf_main_esa.grib"
@@ -357,6 +356,7 @@ def process_ecmwf_data():
     processed = 0
     
     # 5. Loop sulle città
+    s3 = get_r2_client()
     for city, info in venues.items():
         try:
             # Trova l'indice della griglia più vicino alla città
@@ -434,8 +434,8 @@ def process_ecmwf_data():
 
             esaorario_data = []
             for i in range(len(t2m_corr_esa)):
-                dt_utc = ref_dt + timedelta(hours=144 + i*6)
-                dt_local = utc_to_local(dt_utc)
+                dt_utc = ref_dt + timedelta(hours=150 + i*6)
+                dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf)
                 weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
                                            5.0, mucape_esa[i], season_thresh, timestep_hours=6)
                 esaorario_data.append({
@@ -445,6 +445,8 @@ def process_ecmwf_data():
                     "r": round(float(rh2m_esa[i])),
                     "p": round(float(tp_rate_esa[i]),1),
                     "pr": round(float(pmsl_corr_esa[i])),
+                    "v": None,
+                    "vd": None,
                     "w": weather
                 })
 
@@ -474,7 +476,7 @@ def process_ecmwf_data():
                 json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
             
             # Upload su R2
-            upload_to_r2(local_path, run_date, run_hour, safe_city)
+            upload_to_r2(s3, local_path, run_date, run_hour, safe_city)
 
             processed += 1
             if processed % 50 == 0:
