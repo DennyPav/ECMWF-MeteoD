@@ -124,15 +124,17 @@ def get_run_datetime_now_utc():
     return now.strftime("%Y%m%d"), "12"
 
 # ---------------------- DOWNLOAD DATI ----------------------
-def convert_grib_to_nc_no_crop(infile):
+def crop_grib_italy_xarray(infile):
     """
-    Converte GRIB in NetCDF senza ritagliare le coordinate.
-    Necessario per supportare città mondiali (non solo Italia).
+    Ritaglia un file GRIB globale sulle coordinate dell'Italia
+    e lo salva come NetCDF (più leggero e stabile).
     """
     ds = xr.open_dataset(infile, engine="cfgrib")
+    ds_it = ds.sel(longitude=slice(6,19), latitude=slice(48,35))
     outfile = infile.replace(".grib", ".nc")
-    ds.to_netcdf(outfile) 
+    ds_it.to_netcdf(outfile)
     ds.close()
+    ds_it.close()
     return outfile
 
 def download_ecmwf_triorario(run_date, run_hour):
