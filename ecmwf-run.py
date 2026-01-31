@@ -173,7 +173,24 @@ def download_ecmwf_triorario(run_date, run_hour):
     
     return main_file, wind_file, orog_file
 
-# NOTA: La funzione download_ecmwf_esaorario è stata rimossa perché non richiesta.
+def download_ecmwf_esaorario(run_date, run_hour):
+    steps_esa = list(range(144, 331, 6)) if run_hour=="00" else list(range(144, 319, 6))
+    grib_dir = f"{WORKDIR}/grib_ecmwf/{run_date}{run_hour}"
+    os.makedirs(grib_dir, exist_ok=True)
+    main_file_esa = f"{grib_dir}/ecmwf_main_esa.grib"
+    orog_file = f"{grib_dir}/ecmwf_orog.grib"
+    client = Client(source="ecmwf", model="ifs", resol="0p25")
+    if not os.path.exists(main_file_esa) or os.path.getsize(main_file_esa)<30_000_000:
+        client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc",
+                        step=steps_esa, param=["2t","2d","tcc","msl","tp","mucape"], target=main_file_esa)
+    if not os.path.exists(orog_file) or os.path.getsize(orog_file)<1_000:
+        client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc",
+                        step=[0], param=["z"], target=orog_file)
+
+    main_file_esa = crop_grib_italy_xarray(main_file_esa)
+    orog_file = crop_grib_italy_xarray(orog_file)
+
+    return main_file_esa, orog_file
 
 # ---------------------- LOGICA FISICA ----------------------
 def kelvin_to_celsius(k): return k-273.15
@@ -219,7 +236,6 @@ def altitude_correction(t2m, rh, z_model, z_station, pmsl):
 
 # ---------------------- CLASSIFICAZIONE ----------------------
 def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, timestep_hours=3):
-    """Genera una stringa descrittiva (es. 'POCO NUVOLOSO PIOGGIA DEBOLE')."""
     octas = clct / 100.0 * 8
     if octas <= 2: cloud_state = "SERENO"
     elif octas <= 4: cloud_state = "POCO NUVOLOSO"
@@ -231,9 +247,10 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
     prec_type_low = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
 
     # Soglie precipitazione
-    prec_debole_min = 0.3
-    prec_moderata_min = 5.0
-    prec_intensa_min = 20.0
+    if timestep_hours == 3:
+        prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 5.0, 20.0
+    else:
+        prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 10.0, 30.0
 
     # Temporali
     if mucape > 400 and tp_rate > 0.5 * timestep_hours:
@@ -260,47 +277,42 @@ def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, 
     haze_rh = season_thresh.get("haze_rh", 85)
     haze_wd = season_thresh.get("haze_wind", 12)
 
-    if tp_rate < 0.5: # Condizioni di stabilità o pioggia trascurabile
-        weather_suffix = f" {prec_type_low}" if tp_rate >= 0.1 else ""
-        
+    if 0.1 <= tp_rate < 0.5:
         if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
         if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
-        
-        if weather_suffix:
-            if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
-            return cloud_state + weather_suffix
-        
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        return f"{cloud_state} {prec_type_low}"
+
+    elif tp_rate < 0.1: 
+        if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
+        if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
         return cloud_state
         
     return cloud_state
 
 def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thresh, timestep_hours):
-    """Aggrega i dati triorari in un riepilogo giornaliero (Min/Max/Meteo Dominante)."""
     daily = []
     days_map = {}
-    
-    # Raggruppa record per data (stringa YYYYMMDD)
     for i, rec in enumerate(records):
         days_map.setdefault(rec["d"], []).append((i, rec))
         
     for d, items in days_map.items():
         idxs = [x[0] for x in items]
         recs = [x[1] for x in items]
-        
         temps = [r["t"] for r in recs]
-        if not temps: continue
-
         t_min, t_max = min(temps), max(temps)
         tp_tot = sum([r["p"] for r in recs])
         
         snow_steps = 0
         rain_steps = 0
+        has_significant_snow_or_rain = False
         has_storm = False
         
         for r in recs:
             wtxt = r.get("w", "")
             if "TEMPORALE" in wtxt: has_storm = True
             if "PIOGGIA" in wtxt or "NEVE" in wtxt:
+                has_significant_snow_or_rain = True
                 wb = wet_bulb_celsius(r["t"], r["r"])
                 if wb < 0.5: snow_steps += 1
                 else: rain_steps += 1
@@ -308,7 +320,6 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         is_snow_day = snow_steps > rain_steps
         clct_mean = np.mean(clct_arr[idxs])
         octas = clct_mean / 100.0 * 8
-        
         if octas <= 2: c_state = "SERENO"
         elif octas <= 4: c_state = "POCO NUVOLOSO"
         elif octas <= 6: c_state = "NUVOLOSO"
@@ -318,17 +329,13 @@ def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thre
         if has_storm:
             if c_state == "SERENO": c_state = "POCO NUVOLOSO"
             weather_str = f"{c_state} TEMPORALE"
-        elif (snow_steps + rain_steps) > 0: # Se ha piovuto/nevicato in modo significativo
-             # Qui si potrebbe affinare la logica per definire se è una giornata di pioggia
-             # Basandosi sulla quantità totale (tp_tot)
-            if tp_tot >= 1.0: # Se c'è almeno 1mm cumulato
-                ptype = "NEVE" if is_snow_day else "PIOGGIA"
-                if tp_tot >= 30: pint = "INTENSA"
-                elif tp_tot >= 10: pint = "MODERATA"
-                else: pint = "DEBOLE"
-                
-                if c_state == "SERENO": c_state = "POCO NUVOLOSO"
-                weather_str = f"{c_state} {ptype} {pint}"
+        elif has_significant_snow_or_rain:
+            ptype = "NEVE" if is_snow_day else "PIOGGIA"
+            if tp_tot >= 30: pint = "INTENSA"
+            elif tp_tot >= 10: pint = "MODERATA"
+            else: pint = "DEBOLE"
+            if c_state == "SERENO": c_state = "POCO NUVOLOSO"
+            weather_str = f"{c_state} {ptype} {pint}"
             
         daily.append({
             "d": d, "tmin": round(t_min,1), "tmax": round(t_max,1), 
@@ -349,10 +356,12 @@ def process_ecmwf_data():
     
     # 2. Download Dati Triorari
     main_file_tri, wind_file_tri, orog_file = download_ecmwf_triorario(run_date,run_hour)
+    main_file_esa, _ = download_ecmwf_esaorario(run_date,run_hour)
     
     # 3. Apertura Dataset Xarray
     ds_main_tri = xr.open_dataset(main_file_tri)
     ds_wind_tri = xr.open_dataset(wind_file_tri)
+    ds_main_esa=xr.open_dataset(main_file_esa)
     ds_orog = xr.open_dataset(orog_file)
     
     # 4. Caricamento Lista Città
@@ -382,6 +391,8 @@ def process_ecmwf_data():
             # Nota: .values trasforma in numpy array per velocità
             lat_idx_tri = np.abs(ds_main_tri.latitude - info['lat']).argmin()
             lon_idx_tri = np.abs(ds_main_tri.longitude - info['lon']).argmin()
+            lat_idx_esa=np.abs(ds_main_esa.latitude-info['lat']).argmin()
+            lon_idx_esa=np.abs(ds_main_esa.longitude-info['lon']).argmin()
             
             # Estrazione dati puntuali (Triorario)
             t2m_k = ds_main_tri["t2m"].isel(latitude=lat_idx_tri, longitude=lon_idx_tri).values
@@ -434,19 +445,53 @@ def process_ecmwf_data():
                 })
             
             # Calcolo riepilogo giornaliero dai dati triorari
-            daily_summaries = calculate_daily_summaries(trihourly_data, tcc, tp_rate, mucape, season_thresh, timestep_hours=3)
+            daily_summaries_tri=calculate_daily_summaries(trihourly_data,tcc,tp_rate,mucape,season_thresh,timestep_hours=3)
+
+            # --- ESAORARIO ---
+            t2m_k_esa=ds_main_esa["t2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
+            td2m_k_esa=ds_main_esa["d2m"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values
+            tcc_esa=ds_main_esa["tcc"].isel(latitude=lat_idx_esa,longitude=lon_idx_esa).values*100
+            msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
+            tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+
+            rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
+            t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
+            t2m_corr_esa, pmsl_corr_esa = altitude_correction(t2m_c_esa, rh2m_esa, z_model, info['elev'], msl_esa)
+            tp_rate_esa = np.diff(tp_cum_esa, prepend=tp_cum_esa[0]) * 1000
+
+            esaorario_data = []
+            for i in range(len(t2m_corr_esa)):
+                dt_utc = ref_dt + timedelta(hours=144 + i*6)
+                dt_local = utc_to_local(dt_utc)
+                weather = classify_weather(t2m_corr_esa[i], rh2m_esa[i], tcc_esa[i], tp_rate_esa[i],
+                                           5.0, mucape_esa[i], season_thresh, timestep_hours=6)
+                esaorario_data.append({
+                    "d": dt_local.strftime("%Y%m%d"),
+                    "h": dt_local.strftime("%H"),
+                    "t": round(float(t2m_corr_esa[i]),1),
+                    "r": round(float(rh2m_esa[i])),
+                    "p": round(float(tp_rate_esa[i]),1),
+                    "pr": round(float(pmsl_corr_esa[i])),
+                    "w": weather
+                })
+
+            daily_summaries_esa = calculate_daily_summaries(esaorario_data, tcc_esa, tp_rate_esa,
+                                                            mucape_esa, season_thresh, timestep_hours=6)
             
             # Struttura JSON Finale
+            trihourly_all = trihourly_data + esaorario_data
+            daily_all = daily_summaries_tri + daily_summaries_esa
+
             city_data = {
                 "r": RUN,
                 "c": city,
                 "x": info['lat'],
                 "y": info['lon'],
                 "z": info['elev'],
-                # "tz": ... # Si potrebbe salvare il fuso, ma non è richiesto dallo schema
                 "TRIORARIO": trihourly_data,
-                "GIORNALIERO": daily_summaries
-                # ESAORARIO rimosso completamente
+                "ESAORARIO": esaorario_data,
+                "GIORNALIERO": daily_all
             }
 
             # Salvataggio su disco
@@ -469,6 +514,7 @@ def process_ecmwf_data():
 
     ds_main_tri.close()
     ds_wind_tri.close()
+    ds_main_esa.close()
     ds_orog.close()
 
     print(f"Completato {RUN}: {processed}/{len(venues)} città. File salvati in {outdir}/")
