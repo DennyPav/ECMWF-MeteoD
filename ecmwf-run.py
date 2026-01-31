@@ -167,9 +167,9 @@ def download_ecmwf_triorario(run_date, run_hour):
                         step=[0], param=["z"], target=orog_file)
 
     # Conversione in NetCDF
-    main_file = convert_grib_to_nc_no_crop(main_file)
-    wind_file = convert_grib_to_nc_no_crop(wind_file)
-    orog_file = convert_grib_to_nc_no_crop(orog_file)
+    main_file = crop_grib_italy_xarray(main_file)
+    wind_file = crop_grib_italy_xarray(wind_file)
+    orog_file = crop_grib_italy_xarray(orog_file)
     
     return main_file, wind_file, orog_file
 
