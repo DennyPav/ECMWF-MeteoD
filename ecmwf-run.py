@@ -19,7 +19,7 @@ except ImportError:
 # ---------------------- CONFIGURAZIONE ----------------------
 WORKDIR = os.getcwd()
 # File contenente le coordinate delle città [lat, lon, elev]
-VENUES_PATH = os.path.join(WORKDIR, "comuni_estero.json") 
+VENUES_PATH = os.path.join(WORKDIR, "comuni_italia_all.json") 
 
 # --- CONFIGURAZIONE R2 (S3 COMPATIBLE) ---
 # Le credenziali vengono lette dalle variabili d'ambiente per sicurezza
