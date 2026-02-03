@@ -32,7 +32,7 @@ R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
 R2_BUCKET_NAME = "json-meteod"
 
 # --- CAMS (COPERNICUS) ---
-raw_key = os.environ.get("CDS_API_KEY", "c12c8903-f197-4b19-8015-963f3646bcc6") 
+raw_key = os.environ.get("CDS_API_KEY", "") 
 CDS_KEY = raw_key.split(":", 1)[1] if ":" in raw_key else raw_key
 ADS_URL = "https://ads.atmosphere.copernicus.eu/api"
 CAMS_AREA = [48, 6, 35, 19] # Solo Italia
