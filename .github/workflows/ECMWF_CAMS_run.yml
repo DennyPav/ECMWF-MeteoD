@@ -39,7 +39,7 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
         run: |
-          python ECMWF_run.py
+          python ECMWF_CAMS_run.py
 
       # ---------------------------------------------------------
       # 2. SETUP RCLONE (Eseguito solo se Python ha successo)
