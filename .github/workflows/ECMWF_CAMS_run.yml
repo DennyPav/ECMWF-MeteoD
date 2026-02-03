@@ -1,0 +1,90 @@
+name: ECMWF_CAMS MeteoD Italia+Estero
+
+on:
+  schedule:
+    - cron: "30 8 * * *"
+    - cron: "30 19 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-bollettino:
+    runs-on: ubuntu-latest
+    env:
+      LC_ALL: it_IT.UTF-8
+      LANG: it_IT.UTF-8
+      LANGUAGE: it_IT.UTF-8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ---------------------------------------------------------
+      # 1. ESECUZIONE SCRIPT PYTHON (Genera file + Upload R2)
+      # ---------------------------------------------------------
+      - name: Run ECMWF pipeline
+        env:
+          # Le chiavi R2 servono qui allo script Python
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          CDS_API_KEY: ${{ secrets.CDS_API_KEY }}
+        run: |
+          python ECMWF_run.py
+
+      # ---------------------------------------------------------
+      # 2. SETUP RCLONE (Eseguito solo se Python ha successo)
+      # ---------------------------------------------------------
+      - name: Install & Setup rclone
+        if: success()
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          mkdir -p /home/runner/.config/rclone
+          # Usa la variabile d'ambiente
+          echo "${RCLONE_CONFIG}" > /home/runner/.config/rclone/rclone.conf
+          chmod 600 /home/runner/.config/rclone/rclone.conf
+
+      # ---------------------------------------------------------
+      # 3. UPLOAD GOOGLE DRIVE
+      # ---------------------------------------------------------
+      - name: Upload to Google Drive
+        if: success()
+        run: |
+          # Logica per determinare la cartella
+          NOW_HOUR=$(date -u +%H)
+
+          if [ "$NOW_HOUR" -lt 7 ]; then
+            DATE=$(date -u -d "yesterday" +%Y%m%d)
+            RUN=12
+          elif [ "$NOW_HOUR" -lt 19 ]; then
+            DATE=$(date -u +%Y%m%d)
+            RUN=00
+          else
+            DATE=$(date -u +%Y%m%d)
+            RUN=12
+          fi
+
+          RUN_FOLDER="${DATE}${RUN}"
+          LOCAL_DIR="./${RUN_FOLDER}"
+          REMOTE_DIR="gd_personal:MeteoD/ECMWF/${RUN_FOLDER}"
+
+          echo "🚀 Starting upload for: $RUN_FOLDER"
+
+          # Creazione cartella remota
+          rclone mkdir "$REMOTE_DIR" || true
+
+          # Upload finale
+          rclone copy "$LOCAL_DIR" "$REMOTE_DIR" --drive-chunk-size 64M --ignore-existing --verbose
+
+          echo "✅ Upload Google Drive completato"
