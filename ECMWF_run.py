@@ -521,25 +521,25 @@ def main():
     ds_main_esa.close()
     
     # ---------------------- PULIZIA FINALE ----------------------
-    print("\n--- PULIZIA FILE TEMPORANEI ---")
-    try:
-        import shutil
+    # print("\n--- PULIZIA FILE TEMPORANEI ---")
+    # try:
+    #     import shutil
         
-        # 1. Cancella la cartella dei dati grezzi (GRIB/NetCDF) - CONSIGLIATO
-        grib_run_dir = f"{WORKDIR}/grib_ecmwf/{RUN_DATE_TIME}"
-        if os.path.exists(grib_run_dir):
-            shutil.rmtree(grib_run_dir)
-            print(f"✅ Cancellati dati grezzi: {grib_run_dir}")
+    #     # 1. Cancella la cartella dei dati grezzi (GRIB/NetCDF) - CONSIGLIATO
+    #     grib_run_dir = f"{WORKDIR}/grib_ecmwf/{RUN_DATE_TIME}"
+    #     if os.path.exists(grib_run_dir):
+    #         shutil.rmtree(grib_run_dir)
+    #         print(f"✅ Cancellati dati grezzi: {grib_run_dir}")
 
-        # 2. Cancella la cartella dei JSON generati (Opzionale, se vuoi tenerne una copia togli questa parte)
-        if os.path.exists(outdir):
-            shutil.rmtree(outdir)
-            print(f"✅ Cancellati JSON generati: {outdir}")
+    #     # 2. Cancella la cartella dei JSON generati (Opzionale, se vuoi tenerne una copia togli questa parte)
+    #     if os.path.exists(outdir):
+    #         shutil.rmtree(outdir)
+    #         print(f"✅ Cancellati JSON generati: {outdir}")
 
-    except Exception as e:
-        print(f"⚠️ Errore durante la pulizia: {e}")
+    # except Exception as e:
+    #     print(f"⚠️ Errore durante la pulizia: {e}")
 
-    print("\nTutto completato.")
+    # print("\nTutto completato.")
 
 if __name__ == "__main__":
     main()
