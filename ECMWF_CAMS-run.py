@@ -33,7 +33,10 @@ R2_BUCKET_NAME = "json-meteod"
 
 # --- CAMS (COPERNICUS) ---
 raw_key = os.environ.get("CDS_API_KEY", "") 
-CDS_KEY = raw_key.split(":", 1)[1] if ":" in raw_key else raw_key
+if ":" in raw_key:
+    CDS_KEY = raw_key.split(":", 1)[1]
+else:
+    CDS_KEY = raw_key
 ADS_URL = "https://ads.atmosphere.copernicus.eu/api"
 CAMS_AREA = [48, 6, 35, 19] # Solo Italia
 
@@ -45,9 +48,14 @@ WORKDIR = os.getcwd()
 VENUES_ITALIA = os.path.join(WORKDIR, FILE_COMUNI_ITALIA)
 VENUES_ESTERO = os.path.join(WORKDIR, FILE_COMUNI_ESTERO)
 
-# Parametri Meteo
-LAPSE_DRY, LAPSE_MOIST, LAPSE_P, G, RD = 0.0098, 0.006, 0.012, 9.80665, 287.05
+# Lapse Rates
+LAPSE_DRY = 0.0098
+LAPSE_MOIST = 0.006
+LAPSE_P = 0.012
+G = 9.80665
+RD = 287.05
 
+# SOGLIE STAGIONALI (TUE ORIGINALI)
 SEASON_THRESHOLDS = {
     "winter": {"start_day": 1, "end_day": 80, "fog_rh": 96, "haze_rh": 85, "fog_wind": 7.0, "haze_wind": 12.0, "fog_max_t": 15.0},
     "spring": {"start_day": 81, "end_day": 172, "fog_rh": 97, "haze_rh": 85, "fog_wind": 6.0, "haze_wind": 10.0, "fog_max_t": 20.0},
@@ -60,7 +68,9 @@ SEASON_THRESHOLDS = {
 # ============================================================================
 
 def get_r2_client():
-    if not R2_ACCESS_KEY or "INSERISCI" in R2_ACCESS_KEY: return None
+    if "INSERISCI_QUI" in R2_ACCESS_KEY or not R2_ACCESS_KEY:
+        print("ATTENZIONE: Credenziali R2 non impostate.")
+        return None
     return boto3.client('s3', endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET_KEY, region_name='auto')
 
 def upload_to_r2(s3_client, local_file_path, run_date, run_hour, filename_override=None):
@@ -75,7 +85,7 @@ def upload_to_r2(s3_client, local_file_path, run_date, run_hour, filename_overri
         )
         return True
     except Exception as e:
-        print(f"❌ Upload R2 fallito: {e}")
+        print(f"[R2] ❌ Errore upload {local_file_path}: {e}", flush=True)
         return False
 
 def get_run_datetime_now_utc():
@@ -84,103 +94,201 @@ def get_run_datetime_now_utc():
     elif now.hour < 18: return now.strftime("%Y%m%d"), "00"
     return now.strftime("%Y%m%d"), "12"
 
-def get_local_time(dt_utc, lat, lon, tf_instance):
-    if dt_utc.tzinfo is None: dt_utc = dt_utc.replace(tzinfo=timezone.utc)
-    timezone_str = tf_instance.timezone_at(lng=lon, lat=lat)
-    if timezone_str is None: return dt_utc
-    try: return dt_utc.astimezone(ZoneInfo(timezone_str))
-    except Exception: return dt_utc
+# ---------------------- TUE FUNZIONI METEO ORIGINALI (INTATTE) ----------------------
 
-# --- FISICA METEO ---
+def get_local_time(dt_utc, lat, lon, tf_instance):
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    timezone_str = tf_instance.timezone_at(lng=lon, lat=lat)
+    if timezone_str is None:
+        return dt_utc
+    try:
+        local_tz = ZoneInfo(timezone_str)
+        return dt_utc.astimezone(local_tz)
+    except Exception:
+        return dt_utc
+
+def wet_bulb_celsius(t_c, rh_percent):
+    tw = t_c * np.arctan(0.151977 * np.sqrt(rh_percent + 8.313659)) \
+         + np.arctan(t_c + rh_percent) - np.arctan(rh_percent - 1.676331) \
+         + 0.00391838 * rh_percent**1.5 * np.arctan(0.023101 * rh_percent) \
+         - 4.686035
+    return tw
+
+def convert_grib_to_nc_global(infile):
+    # Se esiste già non lo rifacciamo (ottimizzazione)
+    if os.path.exists(infile.replace(".grib", ".nc")): return infile.replace(".grib", ".nc")
+    print(f"Conversione GRIB -> NC: {infile} ...")
+    ds = xr.open_dataset(infile, engine="cfgrib")
+    outfile = infile.replace(".grib", ".nc")
+    ds.to_netcdf(outfile) 
+    ds.close()
+    return outfile
+
 def kelvin_to_celsius(k): return k - 273.15
 def mps_to_kmh(mps): return mps * 3.6
+
 def relative_humidity(t2m_k, td2m_k):
     t_c, td_c = kelvin_to_celsius(t2m_k), kelvin_to_celsius(td2m_k)
     es = 6.112 * np.exp((17.67 * t_c) / (t_c + 243.5))
     e = 6.112 * np.exp((17.67 * td_c) / (td_c + 243.5))
     return np.clip(100 * e / es, 0, 100)
-def wind_speed_direction(u, v): return np.sqrt(u**2 + v**2), (np.degrees(np.arctan2(-u, -v)) % 360)
-def wind_dir_to_cardinal(deg): return ['N','NE','E','SE','S','SW','W','NW'][int((deg + 22.5) % 360 // 45)]
-def get_season_precise(dt_utc):
-    day = dt_utc.timetuple().tm_yday
-    for s, t in SEASON_THRESHOLDS.items():
-        if t["start_day"] <= day <= t["end_day"]: return s, t
-    return "winter", SEASON_THRESHOLDS["winter"]
 
-def wet_bulb_celsius(t_c, rh_percent):
-    return t_c * np.arctan(0.151977 * np.sqrt(rh_percent + 8.313659)) + np.arctan(t_c + rh_percent) - np.arctan(rh_percent - 1.676331) + 0.00391838 * rh_percent**1.5 * np.arctan(0.023101 * rh_percent) - 4.686035
+def wind_speed_direction(u, v):
+    speed_ms = np.sqrt(u**2 + v**2)
+    deg = (np.degrees(np.arctan2(-u, -v)) % 360)
+    return speed_ms, deg
+
+def wind_dir_to_cardinal(deg):
+    return ['N','NE','E','SE','S','SW','W','NW'][int((deg + 22.5) % 360 // 45)]
+
+def get_season_precise(dt_utc):
+    day_of_year = dt_utc.timetuple().tm_yday
+    for season, thresh in SEASON_THRESHOLDS.items():
+        if thresh["start_day"] <= day_of_year <= thresh["end_day"]:
+            return season, thresh
+    return "winter", SEASON_THRESHOLDS["winter"]
 
 def altitude_correction(t2m, rh, z_model, z_station, pmsl):
     delta_z = z_model - z_station
     w_moist = np.clip(rh / 100.0, 0, 1)
     lapse_t = LAPSE_DRY * (1.0 - w_moist) + LAPSE_MOIST * w_moist
     t_corr = t2m + lapse_t * delta_z
-    p_corr = pmsl * np.exp(-G * z_station / (RD * (t_corr + 273.15)))
+    T_mean = t_corr + 273.15
+    p_corr = pmsl * np.exp(-G * z_station / (RD * T_mean))
     return t_corr, p_corr
 
 def classify_weather(t2m, rh2m, clct, tp_rate, wind_kmh, mucape, season_thresh, timestep_hours=3):
     octas = clct / 100.0 * 8
-    cloud = "SERENO" if octas <= 2 else "POCO NUVOLOSO" if octas <= 4 else "NUVOLOSO" if octas <= 6 else "COPERTO"
+    if octas <= 2: cloud_state = "SERENO"
+    elif octas <= 4: cloud_state = "POCO NUVOLOSO"
+    elif octas <= 6: cloud_state = "NUVOLOSO"
+    else: cloud_state = "COPERTO"
+
     wet_bulb = wet_bulb_celsius(t2m, rh2m)
-    p_min, p_mod, p_int = (0.3, 5.0, 20.0) if timestep_hours == 3 else (0.3, 10.0, 30.0)
+    prec_type_high = "NEVE" if wet_bulb < 0.5 else "PIOGGIA"
+    prec_type_low = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
 
-    if mucape > 400 and tp_rate > 0.5 * timestep_hours: return f"{'POCO NUVOLOSO' if cloud == 'SERENO' else cloud} TEMPORALE"
-    
+    if timestep_hours == 3:
+        prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 5.0, 20.0
+    else:
+        prec_debole_min, prec_moderata_min, prec_intensa_min = 0.3, 10.0, 30.0
+
+    if mucape > 400 and tp_rate > 0.5 * timestep_hours:
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        return f"{cloud_state} TEMPORALE"
+
     if tp_rate > 0.9:
-        ptype = "NEVE" if wet_bulb < 0.5 else "PIOGGIA"
-        intensity = "INTENSA" if tp_rate >= p_int else "MODERATA" if tp_rate >= p_mod else "DEBOLE"
-        return f"{'POCO NUVOLOSO' if cloud == 'SERENO' else cloud} {ptype} {intensity}"
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        if tp_rate >= prec_intensa_min: prec_intensity = "INTENSA"
+        elif tp_rate >= prec_moderata_min: prec_intensity = "MODERATA"
+        else: prec_intensity = "DEBOLE"
+        return f"{cloud_state} {prec_type_high} {prec_intensity}"
     elif 0.5 <= tp_rate <= 0.9:
-        ptype = "NEVISCHIO" if wet_bulb < 0.5 else "PIOGGERELLA"
-        return f"{'POCO NUVOLOSO' if cloud == 'SERENO' else cloud} {ptype}"
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        return f"{cloud_state} {prec_type_low}"
     
-    if tp_rate < 0.5:
-        if t2m < season_thresh["fog_max_t"] and rh2m >= season_thresh["fog_rh"] and wind_kmh <= season_thresh["fog_wind"]: return "NEBBIA"
-        if t2m < season_thresh["fog_max_t"] and rh2m >= season_thresh["haze_rh"] and wind_kmh <= season_thresh["haze_wind"]: return "FOSCHIA"
-    return cloud
+    fog_rh = season_thresh.get("fog_rh", 95)
+    fog_wd = season_thresh.get("fog_wind", 8)
+    fog_t = season_thresh.get("fog_max_t", 18)
+    haze_rh = season_thresh.get("haze_rh", 85)
+    haze_wd = season_thresh.get("haze_wind", 12)
 
-def calculate_daily_summaries(records, clct_arr, tp_arr):
+    if 0.1 <= tp_rate < 0.5:
+        if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
+        if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
+        if cloud_state == "SERENO": cloud_state = "POCO NUVOLOSO"
+        return f"{cloud_state} {prec_type_low}"
+    elif tp_rate < 0.1:
+        if t2m < fog_t and rh2m >= fog_rh and wind_kmh <= fog_wd: return "NEBBIA"
+        if t2m < fog_t and rh2m >= haze_rh and wind_kmh <= haze_wd: return "FOSCHIA"
+        return cloud_state
+    
+    return cloud_state
+
+def calculate_daily_summaries(records, clct_arr, tp_arr, mucape_arr, season_thresh, timestep_hours):
     daily = []
     days_map = {}
-    for i, rec in enumerate(records): days_map.setdefault(rec["d"], []).append((i, rec))
+    for i, rec in enumerate(records):
+        days_map.setdefault(rec["d"], []).append((i, rec))
+    
     for d, items in days_map.items():
+        idxs = [x[0] for x in items]
         recs = [x[1] for x in items]
         temps = [r["t"] for r in recs]
+        t_min, t_max = min(temps), max(temps)
         tp_tot = sum([r["p"] for r in recs])
         
-        has_storm = any("TEMPORALE" in r["w"] for r in recs)
-        has_precip = any("PIOGGIA" in r["w"] or "NEVE" in r["w"] for r in recs)
-        snow_cnt = sum(1 for r in recs if wet_bulb_celsius(r["t"], r["r"]) < 0.5)
+        snow_steps = 0
+        rain_steps = 0
+        has_storm = False
+        has_significant_snow_or_rain = False
         
-        octas = np.mean(clct_arr[[x[0] for x in items]]) / 100.0 * 8
-        c_state = "SERENO" if octas <= 2 else "POCO NUVOLOSO" if octas <= 4 else "NUVOLOSO" if octas <= 6 else "COPERTO"
+        for r in recs:
+            wtxt = r.get("w", "")
+            if "TEMPORALE" in wtxt: has_storm = True
+            if "PIOGGIA" in wtxt or "NEVE" in wtxt: has_significant_snow_or_rain = True
+            wb = wet_bulb_celsius(r["t"], r["r"])
+            if wb < 0.5: snow_steps += 1
+            else: rain_steps += 1
         
-        w_str = c_state
-        if has_storm: w_str = f"{'POCO NUVOLOSO' if c_state == 'SERENO' else c_state} TEMPORALE"
-        elif has_precip:
-            ptype = "NEVE" if snow_cnt > (len(recs)-snow_cnt) else "PIOGGIA"
-            pint = "INTENSA" if tp_tot >= 30 else "MODERATA" if tp_tot >= 10 else "DEBOLE"
-            w_str = f"{'POCO NUVOLOSO' if c_state == 'SERENO' else c_state} {ptype} {pint}"
+        is_snow_day = snow_steps > rain_steps
+        clct_mean = np.mean(clct_arr[idxs])
+        octas = clct_mean / 100.0 * 8
+        
+        if octas <= 2: c_state = "SERENO"
+        elif octas <= 4: c_state = "POCO NUVOLOSO"
+        elif octas <= 6: c_state = "NUVOLOSO"
+        else: c_state = "COPERTO"
+        
+        weather_str = c_state
+        if has_storm:
+            if c_state == "SERENO": c_state = "POCO NUVOLOSO"
+            weather_str = f"{c_state} TEMPORALE"
+        elif has_significant_snow_or_rain:
+            ptype = "NEVE" if is_snow_day else "PIOGGIA"
+            if tp_tot >= 30: pint = "INTENSA"
+            elif tp_tot >= 10: pint = "MODERATA"
+            else: pint = "DEBOLE"
+            if c_state == "SERENO": c_state = "POCO NUVOLOSO"
+            weather_str = f"{c_state} {ptype} {pint}"
             
-        daily.append({"d": d, "tmin": round(min(temps), 1), "tmax": round(max(temps), 1), "p": round(tp_tot, 1), "w": w_str})
+        daily.append({
+            "d": d, "tmin": round(t_min, 1), "tmax": round(t_max, 1),
+            "p": round(tp_tot, 1), "w": weather_str
+        })
     return daily
 
-# --- FISICA ARIA ---
+# ---------------------- FUNZIONI ARIA (CAMS) ----------------------
+
 def calculate_caqi(row):
-    def get_si(val, g):
-        for i in range(len(g)-1):
-            if g[i][0] <= val <= g[i+1][0]: return g[i][1] + (val - g[i][0]) * (g[i+1][1] - g[i][1]) / (g[i+1][0] - g[i][0])
-        return g[-1][1] + (val - g[-1][0])
+    def get_sub_index(val, grids):
+        for i in range(len(grids)-1):
+            low_c, low_i = grids[i]
+            high_c, high_i = grids[i+1]
+            if low_c <= val <= high_c:
+                return low_i + (val - low_c) * (high_i - low_i) / (high_c - low_c)
+        last_c, last_i = grids[-1]
+        return last_i + (val - last_c)
     
-    idx = max(
-        get_si(row["pm10"], [(0,0), (25,25), (50,50), (90,75), (180,100)]),
-        get_si(row["pm25"], [(0,0), (15,25), (30,50), (55,75), (110,100)]),
-        get_si(row["no2"],  [(0,0), (50,25), (100,50), (200,75), (400,100)]),
-        get_si(row["o3"],   [(0,0), (60,25), (120,50), (180,75), (240,100)])
-    )
-    val = int(round(idx))
-    lbl = "Molto Basso" if val < 25 else "Basso" if val < 50 else "Medio" if val < 75 else "Alto" if val < 100 else "Molto Alto"
-    return val, lbl
+    grid_pm10 = [(0,0), (25,25), (50,50), (90,75), (180,100)]
+    grid_pm25 = [(0,0), (15,25), (30,50), (55,75), (110,100)]
+    grid_no2  = [(0,0), (50,25), (100,50), (200,75), (400,100)]
+    grid_o3   = [(0,0), (60,25), (120,50), (180,75), (240,100)]
+
+    idx_pm10 = get_sub_index(row["pm10"], grid_pm10)
+    idx_pm25 = get_sub_index(row["pm25"], grid_pm25)
+    idx_no2 = get_sub_index(row["no2"], grid_no2)
+    idx_o3 = get_sub_index(row["o3"], grid_o3)
+
+    final_aqi = int(round(max(idx_pm10, idx_pm25, idx_no2, idx_o3)))
+
+    if final_aqi < 25: label = "Molto Basso"
+    elif final_aqi < 50: label = "Basso"
+    elif final_aqi < 75: label = "Medio"
+    elif final_aqi < 100: label = "Alto"
+    else: label = "Molto Alto"
+    return final_aqi, label
 
 def clean_cams_data(df):
     out = []
@@ -193,33 +301,27 @@ def clean_cams_data(df):
     return out
 
 # ============================================================================
-# DOWNLOAD & DATASET MGMT
+# DOWNLOAD DATA
 # ============================================================================
 
-def convert_grib_to_nc_global(infile):
-    if os.path.exists(infile.replace(".grib", ".nc")): return infile.replace(".grib", ".nc")
-    ds = xr.open_dataset(infile, engine="cfgrib")
-    outfile = infile.replace(".grib", ".nc")
-    ds.to_netcdf(outfile)
-    ds.close()
-    return outfile
-
-def download_data(run_date, run_hour):
+def download_data_unified(run_date, run_hour):
     print(f"--- START DOWNLOAD: {run_date}{run_hour} ---")
     base_dir = f"{WORKDIR}/data_temp/{run_date}{run_hour}"
     os.makedirs(base_dir, exist_ok=True)
     
     # --- 1. ECMWF ---
     client = Client(source="ecmwf", model="ifs", resol="0p25")
-    steps_tri = list(range(0, 145, 3))
-    steps_esa = list(range(150, 331, 6)) if run_hour == "00" else list(range(150, 319, 6))
     
+    # Triorario
+    steps_tri = list(range(0, 145, 3))
     files = {
         "main_tri": (f"{base_dir}/ecmwf_main_tri.grib", ["2t", "2d", "tcc", "msl", "tp", "mucape"], steps_tri),
         "wind_tri": (f"{base_dir}/ecmwf_wind_tri.grib", ["10u", "10v"], steps_tri),
-        "orog": (f"{base_dir}/ecmwf_orog.grib", ["z"], [0]),
-        "main_esa": (f"{base_dir}/ecmwf_main_esa.grib", ["2t", "2d", "tcc", "msl", "tp", "mucape"], steps_esa)
+        "orog": (f"{base_dir}/ecmwf_orog.grib", ["z"], [0])
     }
+    # Esaorario
+    steps_esa = list(range(150, 331, 6)) if run_hour == "00" else list(range(150, 319, 6))
+    files["main_esa"] = (f"{base_dir}/ecmwf_main_esa.grib", ["2t", "2d", "tcc", "msl", "tp", "mucape"], steps_esa)
     
     nc_files = {}
     for key, (path, params, steps) in files.items():
@@ -236,11 +338,12 @@ def download_data(run_date, run_hour):
         if CDS_KEY:
             print("⬇️ CAMS Italia...")
             today = datetime.now(timezone.utc).date()
+            leadtimes = [str(i) for i in range(97)]
             c_client = cdsapi.Client(url=ADS_URL, key=CDS_KEY)
             req = {
                 "variable": ["nitrogen_dioxide", "ozone", "particulate_matter_2.5um", "particulate_matter_10um"],
                 "model": ["ensemble"], "level": ["0"], "date": [f"{today}/{today}"],
-                "type": ["forecast"], "time": ["00:00"], "leadtime_hour": [str(i) for i in range(97)],
+                "type": ["forecast"], "time": ["00:00"], "leadtime_hour": leadtimes,
                 "data_format": "netcdf_zip", "area": CAMS_AREA
             }
             try:
@@ -258,95 +361,152 @@ def download_data(run_date, run_hour):
     return nc_files
 
 # ============================================================================
-# PROCESSING UNIFICATO
+# PROCESSING UNIFICATO (METEO ORIGINAL + CAMS)
 # ============================================================================
 
-def process_unified(venues_path, datasets, run_info, tf, s3, process_air=False):
+def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instance, process_air=False):
     if not os.path.exists(venues_path): return
-    with open(venues_path, 'r', encoding='utf-8') as f: venues = json.load(f)
+    with open(venues_path, 'r', encoding='utf-8') as f: venues_raw = json.load(f)
+    
+    venues = {c: {"lat": float(v[0]), "lon": float(v[1]), "elev": float(v[2])} for c, v in venues_raw.items()}
     print(f"\n🚀 Elaborazione Unificata: {os.path.basename(venues_path)} ({len(venues)} città)")
 
     ref_dt = datetime.strptime(run_info["run_date"] + run_info["run_hour"], "%Y%m%d%H").replace(tzinfo=timezone.utc)
     _, season_thresh = get_season_precise(ref_dt)
     
-    # Shortcuts datasets
-    d_tri, d_wnd, d_orog, d_esa = datasets["main_tri"], datasets["wind_tri"], datasets["orog"], datasets["main_esa"]
-    d_cams = datasets.get("cams")
+    # Dataset Meteo
+    ds_main_tri = datasets["main_tri"]
+    ds_wind_tri = datasets["wind_tri"]
+    ds_orog = datasets["orog"]
+    ds_main_esa = datasets["main_esa"]
+    # Dataset Cams
+    ds_cams = datasets.get("cams")
 
     processed = 0
-    for city, v in venues.items():
+
+    for city, info in venues.items():
         try:
-            lat, lon, elev = float(v[0]), float(v[1]), float(v[2])
-            loc = {"latitude": lat, "longitude": lon}
-            
-            # --- 1. METEO (ECMWF) ---
-            sel_tri = d_tri.sel(loc, method="nearest")
-            sel_wnd = d_wnd.sel(loc, method="nearest")
-            sel_esa = d_esa.sel(loc, method="nearest")
-            z_mod = d_orog.sel(loc, method="nearest")["z"].values/9.81
-            
-            # Calcoli Triorari
-            t2m = kelvin_to_celsius(sel_tri["t2m"].values)
-            rh = relative_humidity(sel_tri["t2m"].values, sel_tri["d2m"].values)
-            t_corr, p_corr = altitude_correction(t2m, rh, z_mod, elev, sel_tri["msl"].values/100)
-            u, v_wind = sel_wnd["u10"].values, sel_wnd["v10"].values
-            spd, dirs = wind_speed_direction(u, v_wind)
-            tp_rate = np.diff(sel_tri["tp"].values, prepend=sel_tri["tp"].values[0]) * 1000
-            
-            tri_data = []
-            for i in range(len(t2m)):
-                dt_loc = get_local_time(ref_dt + timedelta(hours=i*3), lat, lon, tf)
-                w = classify_weather(t_corr[i], rh[i], sel_tri["tcc"].values[i]*100, tp_rate[i], mps_to_kmh(spd[i]), sel_tri["mucape"].values[i], season_thresh, 3)
-                tri_data.append({"d": dt_loc.strftime("%Y%m%d"), "h": dt_loc.strftime("%H"), "t": round(float(t_corr[i]),1), "r": round(float(rh[i])), "p": round(float(tp_rate[i]),1), "pr": int(p_corr[i]), "v": round(float(mps_to_kmh(spd[i])),1), "vd": wind_dir_to_cardinal(dirs[i]), "w": w})
-            
-            # Calcoli Esaorari
-            t2m_e = kelvin_to_celsius(sel_esa["t2m"].values)
-            rh_e = relative_humidity(sel_esa["t2m"].values, sel_esa["d2m"].values)
-            t_corr_e, p_corr_e = altitude_correction(t2m_e, rh_e, z_mod, elev, sel_esa["msl"].values/100)
-            tp_rate_e = np.diff(sel_esa["tp"].values, prepend=sel_esa["tp"].values[0]) * 1000
-            
-            esa_data = []
-            for i in range(len(t2m_e)):
-                dt_loc = get_local_time(ref_dt + timedelta(hours=150 + i*6), lat, lon, tf)
-                w = classify_weather(t_corr_e[i], rh_e[i], sel_esa["tcc"].values[i]*100, tp_rate_e[i], 5.0, sel_esa["mucape"].values[i], season_thresh, 6)
-                esa_data.append({"d": dt_loc.strftime("%Y%m%d"), "h": dt_loc.strftime("%H"), "t": round(float(t_corr_e[i]),1), "r": round(float(rh_e[i])), "p": round(float(tp_rate_e[i]),1), "pr": int(p_corr_e[i]), "v": None, "vd": None, "w": w})
+            # --- 1. METEO (CODICE ORIGINALE ADATTATO AL LOOP) ---
+            # Indici Griglia
+            lat_idx = np.abs(ds_main_tri.latitude - info['lat']).argmin()
+            lon_idx = np.abs(ds_main_tri.longitude - info['lon']).argmin()
+            lat_idx_esa = np.abs(ds_main_esa.latitude - info['lat']).argmin()
+            lon_idx_esa = np.abs(ds_main_esa.longitude - info['lon']).argmin()
 
-            # Merge Giornaliero
-            d_tri_sum = calculate_daily_summaries(tri_data, sel_tri["tcc"].values*100, tp_rate)
-            d_esa_sum = calculate_daily_summaries(esa_data, sel_esa["tcc"].values*100, tp_rate_e)
-            
-            final_daily = list(d_tri_sum)
-            if d_tri_sum and d_esa_sum:
-                if d_tri_sum[-1]["d"] == d_esa_sum[0]["d"]:
-                    d1, d2 = d_tri_sum[-1], d_esa_sum[0]
-                    merged = {"d": d1["d"], "tmin": min(d1["tmin"], d2["tmin"]), "tmax": max(d1["tmax"], d2["tmax"]), "p": round(d1["p"]+d2["p"], 1), "w": d1["w"] if "PIOGGIA" in d1["w"] or "TEMPORALE" in d1["w"] else d2["w"]}
-                    final_daily[-1] = merged
-                    final_daily.extend(d_esa_sum[1:])
-                else: final_daily.extend(d_esa_sum)
-            else: final_daily.extend(d_esa_sum)
+            # TRIORARIO
+            t2m_k = ds_main_tri["t2m"].isel(latitude=lat_idx, longitude=lon_idx).values
+            td2m_k = ds_main_tri["d2m"].isel(latitude=lat_idx, longitude=lon_idx).values
+            tcc = ds_main_tri["tcc"].isel(latitude=lat_idx, longitude=lon_idx).values * 100
+            msl = ds_main_tri["msl"].isel(latitude=lat_idx, longitude=lon_idx).values / 100
+            tp_cum = ds_main_tri["tp"].isel(latitude=lat_idx, longitude=lon_idx).values
+            mucape = ds_main_tri["mucape"].isel(latitude=lat_idx, longitude=lon_idx).values
+            u10 = ds_wind_tri["u10"].isel(latitude=lat_idx, longitude=lon_idx).values
+            v10 = ds_wind_tri["v10"].isel(latitude=lat_idx, longitude=lon_idx).values
+            z_model = ds_orog["z"].isel(latitude=lat_idx, longitude=lon_idx).values / 9.81
 
-            payload = {
-                "r": run_info["run_str"], "c": city, "x": lat, "y": lon, "z": elev,
-                "TRIORARIO": tri_data, "ESAORARIO": esa_data, "GIORNALIERO": final_daily
+            rh2m = relative_humidity(t2m_k, td2m_k)
+            t2m_c = kelvin_to_celsius(t2m_k)
+            t2m_corr, pmsl_corr = altitude_correction(t2m_c, rh2m, z_model, info['elev'], msl)
+            spd_ms, wd_deg = wind_speed_direction(u10, v10)
+            spd_kmh = mps_to_kmh(spd_ms)
+            tp_rate = np.diff(tp_cum, prepend=tp_cum[0]) * 1000
+
+            trihourly_data = []
+            for i in range(len(t2m_corr)):
+                dt_utc = ref_dt + timedelta(hours=i*3)
+                dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
+                w = classify_weather(t2m_corr[i], rh2m[i], tcc[i], tp_rate[i], spd_kmh[i], mucape[i], season_thresh, 3)
+                trihourly_data.append({
+                    "d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H"),
+                    "t": round(float(t2m_corr[i]), 1), "r": round(float(rh2m[i])),
+                    "p": round(float(tp_rate[i]), 1), "pr": round(float(pmsl_corr[i])),
+                    "v": round(float(spd_kmh[i]), 1), "vd": wind_dir_to_cardinal(wd_deg[i]), "w": w
+                })
+            
+            daily_tri = calculate_daily_summaries(trihourly_data, tcc, tp_rate, mucape, season_thresh, 3)
+
+            # ESAORARIO
+            t2m_k_e = ds_main_esa["t2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            td2m_k_e = ds_main_esa["d2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            tcc_e = ds_main_esa["tcc"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values * 100
+            msl_e = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
+            tp_cum_e = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            mucape_e = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            
+            rh2m_e = relative_humidity(t2m_k_e, td2m_k_e)
+            t2m_c_e = kelvin_to_celsius(t2m_k_e)
+            t2m_corr_e, pmsl_corr_e = altitude_correction(t2m_c_e, rh2m_e, z_model, info['elev'], msl_e)
+            tp_rate_e = np.diff(tp_cum_e, prepend=tp_cum_e[0]) * 1000
+
+            esaorario_data = []
+            for i in range(len(t2m_corr_e)):
+                dt_utc = ref_dt + timedelta(hours=150 + i*6)
+                dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
+                w = classify_weather(t2m_corr_e[i], rh2m_e[i], tcc_e[i], tp_rate_e[i], 5.0, mucape_e[i], season_thresh, 6)
+                esaorario_data.append({
+                    "d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H"),
+                    "t": round(float(t2m_corr_e[i]), 1), "r": round(float(rh2m_e[i])),
+                    "p": round(float(tp_rate_e[i]), 1), "pr": round(float(pmsl_corr_e[i])),
+                    "v": None, "vd": None, "w": w
+                })
+
+            daily_esa = calculate_daily_summaries(esaorario_data, tcc_e, tp_rate_e, mucape_e, season_thresh, 6)
+
+            # MERGE GIORNALIERO (TUO CODICE ORIGINALE)
+            final_daily = list(daily_tri)
+            if daily_tri and daily_esa:
+                last_tri = daily_tri[-1]
+                first_esa = daily_esa[0]
+                if last_tri["d"] == first_esa["d"]:
+                    w_final = first_esa["w"]
+                    if "PIOGGIA" in last_tri["w"] or "TEMPORALE" in last_tri["w"] or "NEVE" in last_tri["w"]:
+                         w_final = last_tri["w"]
+                    elif "PIOGGIA" in first_esa["w"] or "TEMPORALE" in first_esa["w"] or "NEVE" in first_esa["w"]:
+                         w_final = first_esa["w"]
+                    
+                    merged_day = {
+                        "d": last_tri["d"],
+                        "tmin": min(last_tri["tmin"], first_esa["tmin"]),
+                        "tmax": max(last_tri["tmax"], first_esa["tmax"]),
+                        "p": round(last_tri["p"] + first_esa["p"], 1),
+                        "w": w_final
+                    }
+                    final_daily[-1] = merged_day
+                    final_daily.extend(daily_esa[1:])
+                else:
+                    final_daily.extend(daily_esa)
+            else:
+                final_daily.extend(daily_esa)
+
+            # Costruzione payload
+            city_data = {
+                "r": run_info["run_str"], "c": city, "x": info['lat'], "y": info['lon'], "z": info['elev'],
+                "TRIORARIO": trihourly_data, "ESAORARIO": esaorario_data, "GIORNALIERO": final_daily
             }
 
-            # --- 2. ARIA (CAMS) - SOLO SE RICHIESTO E DISPONIBILE ---
-            if process_air and d_cams is not None:
+            # --- 2. ARIA (CAMS) - INIEZIONE ---
+            if process_air and ds_cams is not None:
                 try:
-                    # Sel CAMS (gestione lat/lon diverse)
-                    sel_c = d_cams.sel(lat=lat, lon=lon, method="nearest")
+                    # Sel nearest CAMS
+                    sel_c = ds_cams.sel(lat=info['lat'], lon=info['lon'], method="nearest")
                     df = sel_c.to_dataframe().reset_index()
                     
-                    # Fix time axis
+                    # Logica tempo robusta
                     base_utc = pd.Timestamp.now(timezone.utc).normalize()
-                    if "time" in df.columns and df["time"].nunique() > 1: df["t"] = df["time"]
-                    elif "leadtime" in df.columns: df["t"] = base_utc + pd.to_timedelta(df["leadtime"])
-                    else: df["t"] = [base_utc + pd.Timedelta(hours=h) for h in range(len(df))]
+                    if "time" in df.columns and pd.api.types.is_datetime64_any_dtype(df["time"]) and df["time"].nunique() > 1:
+                         df["t"] = df["time"]
+                    elif "leadtime" in df.columns:
+                         df["t"] = base_utc + pd.to_timedelta(df["leadtime"])
+                    elif "step" in df.columns:
+                         df["t"] = base_utc + df["step"]
+                    else:
+                         df["t"] = [base_utc + pd.Timedelta(hours=h) for h in range(len(df))]
                     
                     df = df.set_index("t").sort_index()
                     if df.index.tz is None: df.index = df.index.tz_localize("UTC")
                     df = df.tz_convert("Europe/Rome")
-                    df = df[df.index < (df.index[0] + pd.Timedelta(days=4))] # Cutoff 4gg
+                    cutoff_dt = df.index[0] + pd.Timedelta(days=4)
+                    df = df[df.index < cutoff_dt]
                     df = df[["pm25", "pm10", "no2", "o3"]]
 
                     # Aria aggregata
@@ -362,29 +522,31 @@ def process_unified(venues_path, datasets, run_info, tf, s3, process_air=False):
                         val, lbl = calculate_caqi(row)
                         aria_d.append({"d": dt.strftime("%Y%m%d"), "pm25": int(row["pm25"]), "pm10": int(row["pm10"]), "no2": int(row["no2"]), "o3": int(row["o3"]), "aqi_value": val, "aqi_class": lbl})
 
-                    payload["ARIA_ORARIO"] = aria_h
-                    payload["ARIA_TRIORARIO"] = aria_3h
-                    payload["ARIA_GIORNO"] = aria_d
+                    city_data["ARIA_ORARIO"] = aria_h
+                    city_data["ARIA_TRIORARIO"] = aria_3h
+                    city_data["ARIA_GIORNO"] = aria_d
                 except Exception as e:
-                    # Se fallisce l'aria (es. fuori griglia), salva comunque il meteo
+                    # Se fallisce l'aria (es. fuori griglia), non blocchiamo il meteo
                     pass
 
-            # --- 3. SALVATAGGIO E UPLOAD (UNICA VOLTA) ---
+            # --- 3. SALVATAGGIO E UPLOAD UNICO ---
             safe_name = city.replace("'", " ").replace("/", "-")
             out_file = os.path.join(run_info["outdir"], f"{safe_name}_ecmwf.json")
             
             with open(out_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
+                json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
             
-            if s3: upload_to_r2(s3, out_file, run_info["run_date"], run_info["run_hour"], os.path.basename(out_file))
+            if s3_client:
+                upload_to_r2(s3_client, out_file, run_info["run_date"], run_info["run_hour"], os.path.basename(out_file))
             
             processed += 1
             if processed % 50 == 0: print(f"{processed}...", end=" ", flush=True)
 
         except Exception as e:
             print(f"\n⚠️ Errore {city}: {e}")
-
-    print(f"\n✅ Completato {processed} città.")
+            continue
+            
+    print(f"\n✅ Completato {os.path.basename(venues_path)}: {processed} città.")
 
 # ============================================================================
 # MAIN
@@ -396,7 +558,7 @@ def main():
     print(f"--- RUN: {run_str} ---")
     
     # 1. DOWNLOAD ALL
-    files = download_data(rd, rh)
+    files = download_data_unified(rd, rh)
     
     # 2. SETUP
     tf = TimezoneFinder(in_memory=True)
@@ -407,10 +569,10 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     run_info = {"run_date": rd, "run_hour": rh, "run_str": run_str, "outdir": outdir}
 
-    # 3. OPEN ALL DATASETS
+    # 3. OPEN DATASETS
     print("📂 Apertura Dataset (Meteo + Aria)...")
     try:
-        ds = {
+        datasets = {
             "main_tri": xr.open_dataset(files["main_tri"]),
             "wind_tri": xr.open_dataset(files["wind_tri"]),
             "orog": xr.open_dataset(files["orog"]),
@@ -418,34 +580,35 @@ def main():
             "cams": xr.open_dataset(files["cams"]) if files.get("cams") else None
         }
         
-        # Prep CAMS names if loaded
-        if ds["cams"]:
+        # Prep CAMS
+        if datasets["cams"]:
             rn = {}
-            for v in ds["cams"].data_vars:
+            for v in datasets["cams"].data_vars:
                 if "pm2p5" in v: rn[v] = "pm25"
                 elif "pm10" in v: rn[v] = "pm10"
                 elif "no2" in v: rn[v] = "no2"
                 elif "o3" in v: rn[v] = "o3"
-            ds["cams"] = ds["cams"].rename(rn)
-            if "latitude" in ds["cams"].coords: ds["cams"] = ds["cams"].rename({"latitude": "lat", "longitude": "lon"})
-            ds["cams"] = ds["cams"][["pm25", "pm10", "no2", "o3"]]
+            if rn: datasets["cams"] = datasets["cams"].rename(rn)
+            if "latitude" in datasets["cams"].coords: datasets["cams"] = datasets["cams"].rename({"latitude": "lat", "longitude": "lon"})
+            datasets["cams"] = datasets["cams"][["pm25", "pm10", "no2", "o3"]]
 
     except Exception as e:
         print(f"❌ Errore Dataset: {e}")
         return
 
-    # 4. PROCESS LOOP
-    # Italia -> Meteo + Aria
-    process_unified(VENUES_ITALIA, ds, run_info, tf, s3, process_air=True)
+    # 4. PROCESS LOOPS
     
-    # Estero -> Solo Meteo
-    process_unified(VENUES_ESTERO, ds, run_info, tf, s3, process_air=False)
+    # FASE 1: ITALIA (Processa Aria = True)
+    process_unified_venues(VENUES_ITALIA, datasets, run_info, s3, tf, process_air=True)
+    
+    # FASE 2: ESTERO (Processa Aria = False)
+    process_unified_venues(VENUES_ESTERO, datasets, run_info, s3, tf, process_air=False)
 
     # Cleanup
-    for d in ds.values(): 
+    for d in datasets.values(): 
         if d: d.close()
     
-    # Opzionale: Pulizia temp
+    # Opzionale:
     # shutil.rmtree(f"{WORKDIR}/data_temp/{run_str}")
     print("\n🏁 FINITO.")
 
