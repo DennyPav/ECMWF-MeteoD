@@ -333,10 +333,10 @@ def download_data_unified(run_date, run_hour):
     # --- 2. CAMS (Solo se necessario per Italia) ---
     cams_zip = f"{base_dir}/cams.zip"
     cams_nc = f"{base_dir}/cams.nc"
-    
+
     if not os.path.exists(cams_nc):
         if CDS_KEY:
-            print("⬇️ CAMS Italia...")
+            print("⬇️ CAMS Italia...", flush=True)
             today = datetime.now(timezone.utc).date()
             leadtimes = [str(i) for i in range(97)]
             c_client = cdsapi.Client(url=ADS_URL, key=CDS_KEY)
@@ -348,17 +348,30 @@ def download_data_unified(run_date, run_hour):
             }
             try:
                 c_client.retrieve("cams-europe-air-quality-forecasts", req).download(cams_zip)
-                with zipfile.ZipFile(cams_zip, "r") as z: z.extractall(base_dir)
-                found = [f for f in os.listdir(base_dir) if f.endswith(".nc") and "cams" not in f][0]
-                os.rename(os.path.join(base_dir, found), cams_nc)
+            
+                # ESTRAI IN SUBDIRECTORY SEPARATA
+                cams_extract_dir = f"{base_dir}/cams_extract"
+                os.makedirs(cams_extract_dir, exist_ok=True)
+            
+                with zipfile.ZipFile(cams_zip, "r") as z: 
+                    z.extractall(cams_extract_dir)
+            
+                # CERCA SOLO NELLA SUBDIRECTORY CAMS
+                found = [f for f in os.listdir(cams_extract_dir) if f.endswith(".nc")][0]
+                shutil.move(os.path.join(cams_extract_dir, found), cams_nc)
+            
+                # Cleanup subdirectory temporanea
+                shutil.rmtree(cams_extract_dir)
+            
             except Exception as e:
                 print(f"⚠️ CAMS fallito: {e}")
                 cams_nc = None
         else:
             cams_nc = None
-    
+
     nc_files["cams"] = cams_nc
     return nc_files
+
 
 # ============================================================================
 # PROCESSING UNIFICATO (METEO ORIGINAL + CAMS)
