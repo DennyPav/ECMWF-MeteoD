@@ -524,7 +524,11 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
 
                     # Aria aggregata
                     aria_h = clean_cams_data(df)
-                    aria_3h = clean_cams_data(df.resample("3h").mean().dropna())
+                    # Calcola l'offset dall'inizio del giorno
+                    first_hour = df.index[0].hour
+                    offset_str = f"{first_hour}h"
+
+                    aria_3h = clean_cams_data(df.resample("3h", offset=offset_str).mean().dropna())
                     
                     df_d = df.resample("1D").mean()
                     counts = df.resample("1D").count()["pm25"]
