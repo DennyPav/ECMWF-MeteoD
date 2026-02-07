@@ -287,7 +287,7 @@ def calculate_caqi(row):
     elif final_aqi < 50: label = "Buona"
     elif final_aqi < 70: label = "Discreta"
     elif final_aqi < 90: label = "Pessima"
-        elif final_aqi < 120: label = "Inquinata"
+    elif final_aqi < 120: label = "Inquinata"
     else: label = "Molto inquinata"
     return final_aqi, label
 
