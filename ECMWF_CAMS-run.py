@@ -283,11 +283,12 @@ def calculate_caqi(row):
 
     final_aqi = int(round(max(idx_pm10, idx_pm25, idx_no2, idx_o3)))
 
-    if final_aqi < 25: label = "Molto Basso"
-    elif final_aqi < 50: label = "Basso"
-    elif final_aqi < 75: label = "Medio"
-    elif final_aqi < 100: label = "Alto"
-    else: label = "Molto Alto"
+    if final_aqi < 30: label = "Ottima"
+    elif final_aqi < 50: label = "Buona"
+    elif final_aqi < 70: label = "Discreta"
+    elif final_aqi < 90: label = "Pessima"
+        elif final_aqi < 120: label = "Inquinata"
+    else: label = "Molto inquinata"
     return final_aqi, label
 
 def clean_cams_data(df):
