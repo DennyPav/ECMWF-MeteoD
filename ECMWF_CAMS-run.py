@@ -406,10 +406,10 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
             # ============================================================================
 
             def round_to_nearest_3h(hour):
-                return int((hour + 1.5) // 3 * 3) % 24
+                return (hour // 3) * 3
 
             def round_to_nearest_6h(hour):
-                return int((hour + 3) // 6 * 6) % 24
+                return (hour // 6) * 6
 
             def cloud_state_from_values(clct_mean):
                 octas = clct_mean / 100.0 * 8
