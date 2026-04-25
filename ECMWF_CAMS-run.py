@@ -400,174 +400,174 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
     processed = 0
 
     for city, info in venues.items():
-		try:
-			# ============================================================================
-			# ECMWF: TRIORARIO (00/03/06/09/12/15/18/21 locali COMPLETE - TUTTI DATI)
-			# ============================================================================
-			
-			# Indici Griglia
-			lat_idx = np.abs(ds_main_tri.latitude - info['lat']).argmin()
-			lon_idx = np.abs(ds_main_tri.longitude - info['lon']).argmin()
-			lat_idx_esa = np.abs(ds_main_esa.latitude - info['lat']).argmin()
-			lon_idx_esa = np.abs(ds_main_esa.longitude - info['lon']).argmin()
+        try:
+            # ============================================================================
+            # ECMWF: TRIORARIO (00/03/06/09/12/15/18/21 locali COMPLETE - TUTTI DATI)
+            # ============================================================================
+            
+            # Indici Griglia
+            lat_idx = np.abs(ds_main_tri.latitude - info['lat']).argmin()
+            lon_idx = np.abs(ds_main_tri.longitude - info['lon']).argmin()
+            lat_idx_esa = np.abs(ds_main_esa.latitude - info['lat']).argmin()
+            lon_idx_esa = np.abs(ds_main_esa.longitude - info['lon']).argmin()
 
-			# TRIORARIO RAW
-			t2m_k_tri = ds_main_tri["t2m"].isel(latitude=lat_idx, longitude=lon_idx).values
-			td2m_k_tri = ds_main_tri["d2m"].isel(latitude=lat_idx, longitude=lon_idx).values
-			tcc_tri = ds_main_tri["tcc"].isel(latitude=lat_idx, longitude=lon_idx).values * 100
-			msl_tri = ds_main_tri["msl"].isel(latitude=lat_idx, longitude=lon_idx).values / 100
-			tp_cum_tri = ds_main_tri["tp"].isel(latitude=lat_idx, longitude=lon_idx).values
-			mucape_tri = ds_main_tri["mucape"].isel(latitude=lat_idx, longitude=lon_idx).values
-			u10_tri = ds_wind_tri["u10"].isel(latitude=lat_idx, longitude=lon_idx).values
-			v10_tri = ds_wind_tri["v10"].isel(latitude=lat_idx, longitude=lon_idx).values
-			z_model = ds_orog["z"].isel(latitude=lat_idx, longitude=lon_idx).values / 9.81
+            # TRIORARIO RAW
+            t2m_k_tri = ds_main_tri["t2m"].isel(latitude=lat_idx, longitude=lon_idx).values
+            td2m_k_tri = ds_main_tri["d2m"].isel(latitude=lat_idx, longitude=lon_idx).values
+            tcc_tri = ds_main_tri["tcc"].isel(latitude=lat_idx, longitude=lon_idx).values * 100
+            msl_tri = ds_main_tri["msl"].isel(latitude=lat_idx, longitude=lon_idx).values / 100
+            tp_cum_tri = ds_main_tri["tp"].isel(latitude=lat_idx, longitude=lon_idx).values
+            mucape_tri = ds_main_tri["mucape"].isel(latitude=lat_idx, longitude=lon_idx).values
+            u10_tri = ds_wind_tri["u10"].isel(latitude=lat_idx, longitude=lon_idx).values
+            v10_tri = ds_wind_tri["v10"].isel(latitude=lat_idx, longitude=lon_idx).values
+            z_model = ds_orog["z"].isel(latitude=lat_idx, longitude=lon_idx).values / 9.81
 
-			# Preprocessing triorario
-			rh2m_tri = relative_humidity(t2m_k_tri, td2m_k_tri)
-			t2m_c_tri = kelvin_to_celsius(t2m_k_tri)
-			t2m_corr_tri, pmsl_corr_tri = altitude_correction(t2m_c_tri, rh2m_tri, z_model, info['elev'], msl_tri)
-			spd_ms_tri, wd_deg_tri = wind_speed_direction(u10_tri, v10_tri)
-			spd_kmh_tri = mps_to_kmh(spd_ms_tri)
-			tp_rate_tri = np.diff(tp_cum_tri, prepend=tp_cum_tri[0]) * 1000
+            # Preprocessing triorario
+            rh2m_tri = relative_humidity(t2m_k_tri, td2m_k_tri)
+            t2m_c_tri = kelvin_to_celsius(t2m_k_tri)
+            t2m_corr_tri, pmsl_corr_tri = altitude_correction(t2m_c_tri, rh2m_tri, z_model, info['elev'], msl_tri)
+            spd_ms_tri, wd_deg_tri = wind_speed_direction(u10_tri, v10_tri)
+            spd_kmh_tri = mps_to_kmh(spd_ms_tri)
+            tp_rate_tri = np.diff(tp_cum_tri, prepend=tp_cum_tri[0]) * 1000
 
-			# Timestamp locali triorario
-			local_hours_tri = []
-			placeholder_tri = []
-			for i in range(len(t2m_corr_tri)):
-				dt_utc = ref_dt + timedelta(hours=i*3)
-				dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
-				local_hours_tri.append(int(dt_local.strftime("%H")))
-				placeholder_tri.append({"d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H")})
+            # Timestamp locali triorario
+            local_hours_tri = []
+            placeholder_tri = []
+            for i in range(len(t2m_corr_tri)):
+                dt_utc = ref_dt + timedelta(hours=i*3)
+                dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
+                local_hours_tri.append(int(dt_local.strftime("%H")))
+                placeholder_tri.append({"d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H")})
 
-			# AGGREGA solo triorari COMPLETE standard 00/03/06/09/12/15/18/21
-			triorario_starts = [0, 3, 6, 9, 12, 15, 18, 21]
-			final_tri = []
-			for b in range(len(local_hours_tri) - 2):
-				start_hour = local_hours_tri[b]
-				if start_hour in triorario_starts:
-					if (local_hours_tri[b+1] == (start_hour + 1) % 24 and 
-						local_hours_tri[b+2] == (start_hour + 2) % 24):
-						e = b + 3
-						target_h = f"{start_hour:02d}"
-						
-						t_avg = float(np.mean(t2m_corr_tri[b:e]))
-						rh_avg = float(np.mean(rh2m_tri[b:e]))
-						ct_avg = float(np.mean(tcc_tri[b:e]))
-						wk_avg = float(np.mean(spd_kmh_tri[b:e]))
-						pr_avg = float(np.mean(pmsl_corr_tri[b:e]))
-						tp_sum = float(np.sum(tp_rate_tri[b:e]))
-						
-						dirs = [wind_dir_to_cardinal(wd_deg_tri[j]) for j in range(b, e)]
-						most_common_dir = Counter(dirs).most_common(1)[0][0]
-						
-						w3 = classify_weather(t_avg, rh_avg, ct_avg, tp_sum, wk_avg, 
-											 float(np.mean(mucape_tri[b:e])), season_thresh, 3)
-						
-						final_tri.append({
-							"d": placeholder_tri[b]["d"], "h": target_h,
-							"t": round(t_avg, 1), "r": round(rh_avg), 
-							"p": round(tp_sum, 1), "pr": round(pr_avg),
-							"v": round(wk_avg, 1), "vd": most_common_dir, "w": w3
-						})
+            # AGGREGA solo triorari COMPLETE standard 00/03/06/09/12/15/18/21
+            triorario_starts = [0, 3, 6, 9, 12, 15, 18, 21]
+            final_tri = []
+            for b in range(len(local_hours_tri) - 2):
+                start_hour = local_hours_tri[b]
+                if start_hour in triorario_starts:
+                    if (local_hours_tri[b+1] == (start_hour + 1) % 24 and 
+                        local_hours_tri[b+2] == (start_hour + 2) % 24):
+                        e = b + 3
+                        target_h = f"{start_hour:02d}"
+                        
+                        t_avg = float(np.mean(t2m_corr_tri[b:e]))
+                        rh_avg = float(np.mean(rh2m_tri[b:e]))
+                        ct_avg = float(np.mean(tcc_tri[b:e]))
+                        wk_avg = float(np.mean(spd_kmh_tri[b:e]))
+                        pr_avg = float(np.mean(pmsl_corr_tri[b:e]))
+                        tp_sum = float(np.sum(tp_rate_tri[b:e]))
+                        
+                        dirs = [wind_dir_to_cardinal(wd_deg_tri[j]) for j in range(b, e)]
+                        most_common_dir = Counter(dirs).most_common(1)[0][0]
+                        
+                        w3 = classify_weather(t_avg, rh_avg, ct_avg, tp_sum, wk_avg, 
+                                             float(np.mean(mucape_tri[b:e])), season_thresh, 3)
+                        
+                        final_tri.append({
+                            "d": placeholder_tri[b]["d"], "h": target_h,
+                            "t": round(t_avg, 1), "r": round(rh_avg), 
+                            "p": round(tp_sum, 1), "pr": round(pr_avg),
+                            "v": round(wk_avg, 1), "vd": most_common_dir, "w": w3
+                        })
 
-			# Calcola daily_tri dal final_tri (adattato)
-			tcc_tri_agg = np.array([float(x["w"].split()[-1]) if "COPERTO" in x["w"] else 50 for x in final_tri])  # Approx
-			tp_tri_agg = np.array([float(x["p"]) for x in final_tri])
-			mucape_tri_agg = np.full(len(final_tri), 100.0)  # Approx per daily
-			daily_tri = calculate_daily_summaries(final_tri, tcc_tri_agg, tp_tri_agg, mucape_tri_agg, season_thresh, 3)
+            # Calcola daily_tri dal final_tri (adattato)
+            tcc_tri_agg = np.array([float(x["w"].split()[-1]) if "COPERTO" in x["w"] else 50 for x in final_tri])  # Approx
+            tp_tri_agg = np.array([float(x["p"]) for x in final_tri])
+            mucape_tri_agg = np.full(len(final_tri), 100.0)  # Approx per daily
+            daily_tri = calculate_daily_summaries(final_tri, tcc_tri_agg, tp_tri_agg, mucape_tri_agg, season_thresh, 3)
 
-			# ============================================================================
-			# ECMWF: ESAORARIO (00/06/12/18 locali COMPLETE)
-			# ============================================================================
+            # ============================================================================
+            # ECMWF: ESAORARIO (00/06/12/18 locali COMPLETE)
+            # ============================================================================
 
-			# ESAORARIO RAW  
-			t2m_k_esa = ds_main_esa["t2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-			td2m_k_esa = ds_main_esa["d2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-			tcc_esa = ds_main_esa["tcc"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values * 100
-			msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
-			tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-			mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-			
-			rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
-			t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
-			t2m_corr_esa, pmsl_corr_esa = altitude_correction(t2m_c_esa, rh2m_esa, z_model, info['elev'], msl_esa)
-			tp_rate_esa = np.diff(tp_cum_esa, prepend=tp_cum_esa[0]) * 1000
+            # ESAORARIO RAW  
+            t2m_k_esa = ds_main_esa["t2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            td2m_k_esa = ds_main_esa["d2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            tcc_esa = ds_main_esa["tcc"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values * 100
+            msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
+            tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            
+            rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
+            t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
+            t2m_corr_esa, pmsl_corr_esa = altitude_correction(t2m_c_esa, rh2m_esa, z_model, info['elev'], msl_esa)
+            tp_rate_esa = np.diff(tp_cum_esa, prepend=tp_cum_esa[0]) * 1000
 
-			# Timestamp locali esaorario
-			local_hours_esa = []
-			placeholder_esa = []
-			for i in range(len(t2m_corr_esa)):
-				dt_utc = ref_dt + timedelta(hours=150 + i*6)
-				dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
-				local_hours_esa.append(int(dt_local.strftime("%H")))
-				placeholder_esa.append({"d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H")})
+            # Timestamp locali esaorario
+            local_hours_esa = []
+            placeholder_esa = []
+            for i in range(len(t2m_corr_esa)):
+                dt_utc = ref_dt + timedelta(hours=150 + i*6)
+                dt_local = get_local_time(dt_utc, info['lat'], info['lon'], tf_instance)
+                local_hours_esa.append(int(dt_local.strftime("%H")))
+                placeholder_esa.append({"d": dt_local.strftime("%Y%m%d"), "h": dt_local.strftime("%H")})
 
-			# AGGREGA esaore COMPLETE 00/06/12/18
-			esa_starts = [0, 6, 12, 18]
-			final_esa = []
-			for b in range(len(local_hours_esa) - 1):
-				start_hour = local_hours_esa[b]
-				if start_hour in esa_starts and b + 1 < len(local_hours_esa):
-					next_hour = local_hours_esa[b+1]
-					if next_hour == (start_hour + 6) % 24:
-						e = b + 2
-						target_h = f"{start_hour:02d}"
-						
-						t_avg = float(np.mean(t2m_corr_esa[b:e]))
-						rh_avg = float(np.mean(rh2m_esa[b:e]))
-						ct_avg = float(np.mean(tcc_esa[b:e]))
-						pr_avg = float(np.mean(pmsl_corr_esa[b:e]))
-						tp_sum = float(np.sum(tp_rate_esa[b:e]))
-						
-						w6 = classify_weather(t_avg, rh_avg, ct_avg, tp_sum, 5.0, 
-											 float(np.mean(mucape_esa[b:e])), season_thresh, 6)
-						
-						final_esa.append({
-							"d": placeholder_esa[b]["d"], "h": target_h,
-							"t": round(t_avg, 1), "r": round(rh_avg), 
-							"p": round(tp_sum, 1), "pr": round(pr_avg),
-							"v": None, "vd": None, "w": w6
-						})
+            # AGGREGA esaore COMPLETE 00/06/12/18
+            esa_starts = [0, 6, 12, 18]
+            final_esa = []
+            for b in range(len(local_hours_esa) - 1):
+                start_hour = local_hours_esa[b]
+                if start_hour in esa_starts and b + 1 < len(local_hours_esa):
+                    next_hour = local_hours_esa[b+1]
+                    if next_hour == (start_hour + 6) % 24:
+                        e = b + 2
+                        target_h = f"{start_hour:02d}"
+                        
+                        t_avg = float(np.mean(t2m_corr_esa[b:e]))
+                        rh_avg = float(np.mean(rh2m_esa[b:e]))
+                        ct_avg = float(np.mean(tcc_esa[b:e]))
+                        pr_avg = float(np.mean(pmsl_corr_esa[b:e]))
+                        tp_sum = float(np.sum(tp_rate_esa[b:e]))
+                        
+                        w6 = classify_weather(t_avg, rh_avg, ct_avg, tp_sum, 5.0, 
+                                             float(np.mean(mucape_esa[b:e])), season_thresh, 6)
+                        
+                        final_esa.append({
+                            "d": placeholder_esa[b]["d"], "h": target_h,
+                            "t": round(t_avg, 1), "r": round(rh_avg), 
+                            "p": round(tp_sum, 1), "pr": round(pr_avg),
+                            "v": None, "vd": None, "w": w6
+                        })
 
-			# Daily esaorario (approx per merge)
-			tcc_esa_agg = np.array([float(x["w"].split()[-1]) if "COPERTO" in x["w"] else 50 for x in final_esa])
-			tp_esa_agg = np.array([float(x["p"]) for x in final_esa])
-			mucape_esa_agg = np.full(len(final_esa), 100.0)
-			daily_esa = calculate_daily_summaries(final_esa, tcc_esa_agg, tp_esa_agg, mucape_esa_agg, season_thresh, 6)
+            # Daily esaorario (approx per merge)
+            tcc_esa_agg = np.array([float(x["w"].split()[-1]) if "COPERTO" in x["w"] else 50 for x in final_esa])
+            tp_esa_agg = np.array([float(x["p"]) for x in final_esa])
+            mucape_esa_agg = np.full(len(final_esa), 100.0)
+            daily_esa = calculate_daily_summaries(final_esa, tcc_esa_agg, tp_esa_agg, mucape_esa_agg, season_thresh, 6)
 
-			# MERGE GIORNALIERO (TUO CODICE ORIGINALE - INVARIATO)
-			final_daily = list(daily_tri)
-			if daily_tri and daily_esa:
-				last_tri = daily_tri[-1]
-				first_esa = daily_esa[0]
-				if last_tri["d"] == first_esa["d"]:
-					w_final = first_esa["w"]
-					if "PIOGGIA" in last_tri["w"] or "TEMPORALE" in last_tri["w"] or "NEVE" in last_tri["w"]:
-						 w_final = last_tri["w"]
-					elif "PIOGGIA" in first_esa["w"] or "TEMPORALE" in first_esa["w"] or "NEVE" in first_esa["w"]:
-						 w_final = first_esa["w"]
-					
-					merged_day = {
-						"d": last_tri["d"],
-						"tmin": min(last_tri["tmin"], first_esa["tmin"]),
-						"tmax": max(last_tri["tmax"], first_esa["tmax"]),
-						"p": round(last_tri["p"] + first_esa["p"], 1),
-						"w": w_final
-					}
-					final_daily[-1] = merged_day
-					final_daily.extend(daily_esa[1:])
-				else:
-					final_daily.extend(daily_esa)
-			else:
-				final_daily.extend(daily_esa)
+            # MERGE GIORNALIERO (TUO CODICE ORIGINALE - INVARIATO)
+            final_daily = list(daily_tri)
+            if daily_tri and daily_esa:
+                last_tri = daily_tri[-1]
+                first_esa = daily_esa[0]
+                if last_tri["d"] == first_esa["d"]:
+                    w_final = first_esa["w"]
+                    if "PIOGGIA" in last_tri["w"] or "TEMPORALE" in last_tri["w"] or "NEVE" in last_tri["w"]:
+                         w_final = last_tri["w"]
+                    elif "PIOGGIA" in first_esa["w"] or "TEMPORALE" in first_esa["w"] or "NEVE" in first_esa["w"]:
+                         w_final = first_esa["w"]
+                    
+                    merged_day = {
+                        "d": last_tri["d"],
+                        "tmin": min(last_tri["tmin"], first_esa["tmin"]),
+                        "tmax": max(last_tri["tmax"], first_esa["tmax"]),
+                        "p": round(last_tri["p"] + first_esa["p"], 1),
+                        "w": w_final
+                    }
+                    final_daily[-1] = merged_day
+                    final_daily.extend(daily_esa[1:])
+                else:
+                    final_daily.extend(daily_esa)
+            else:
+                final_daily.extend(daily_esa)
 
-			# Costruzione payload
-			city_data = {
-				"r": run_info["run_str"], "c": city, "x": info['lat'], "y": info['lon'], "z": info['elev'],
-				"TRIORARIO": final_tri,      # ✅ 00/03/06/09/12/15/18/21 complete
-				"ESAORARIO": final_esa,      # ✅ 00/06/12/18 complete  
-				"GIORNALIERO": final_daily
-			}
+            # Costruzione payload
+            city_data = {
+                "r": run_info["run_str"], "c": city, "x": info['lat'], "y": info['lon'], "z": info['elev'],
+                "TRIORARIO": final_tri,      # ✅ 00/03/06/09/12/15/18/21 complete
+                "ESAORARIO": final_esa,      # ✅ 00/06/12/18 complete  
+                "GIORNALIERO": final_daily
+            }
 
             # --- 2. ARIA (CAMS) - INIEZIONE ---
             if process_air and ds_cams is not None:
