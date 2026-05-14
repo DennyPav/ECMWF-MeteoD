@@ -311,11 +311,8 @@ def download_data_unified(run_date, run_hour):
     base_dir = f"{WORKDIR}/data_temp/{run_date}{run_hour}"
     os.makedirs(base_dir, exist_ok=True)
     
-    # # --- 1. ECMWF --- #disabilito perchè sempre pieno
-    # client = Client(source="ecmwf", model="ifs", resol="0p25")
-
-    # --- 1. AWS ---
-    client = Client(source="aws", model="ifs", resol="0p25")
+    # --- 1. ECMWF ---
+    client = Client(source="ecmwf", model="ifs", resol="0p25")
     
     # Triorario
     steps_tri = list(range(0, 145, 3))
