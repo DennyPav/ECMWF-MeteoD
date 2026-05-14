@@ -312,7 +312,7 @@ def download_data_unified(run_date, run_hour):
     os.makedirs(base_dir, exist_ok=True)
     
     # --- 1. ECMWF ---
-    client = Client(source="ecmwf", model="ifs", resol="0p25")
+    client = Client(source="google", model="ifs", resol="0p25")
     
     # Triorario
     steps_tri = list(range(0, 145, 3))
