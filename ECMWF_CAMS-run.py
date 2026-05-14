@@ -117,10 +117,23 @@ def wet_bulb_celsius(t_c, rh_percent):
     return tw
 
 def convert_grib_to_nc_global(infile):
-    # Se esiste già non lo rifacciamo (ottimizzazione)
-    if os.path.exists(infile.replace(".grib", ".nc")): return infile.replace(".grib", ".nc")
+    if os.path.exists(infile.replace(".grib", ".nc")): 
+        return infile.replace(".grib", ".nc")
+    
     print(f"Conversione GRIB -> NC: {infile} ...")
-    ds = xr.open_dataset(infile, engine="cfgrib")
+    
+    try:
+        # Tentativo 1: Apertura standard
+        ds = xr.open_dataset(infile, engine="cfgrib")
+    except Exception as e:
+        # Tentativo 2: Se fallisce per i livelli multipli, forza il filtro surface
+        if "typeOfLevel" in str(e):
+            print(f"⚠️ Rilevati livelli multipli in {os.path.basename(infile)}, filtro per 'surface'...")
+            ds = xr.open_dataset(infile, engine="cfgrib", 
+                                 backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
+        else:
+            raise e
+
     outfile = infile.replace(".grib", ".nc")
     ds.to_netcdf(outfile) 
     ds.close()
