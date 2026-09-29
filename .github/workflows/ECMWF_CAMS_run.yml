@@ -2,8 +2,8 @@ name: ECMWF_CAMS MeteoD Italia+Estero
 
 on:
   schedule:
-    - cron: "01 8 * * *"
-    - cron: "30 19 * * *"
+    - cron: "01 6 * * *"
+    - cron: "30 17 * * *"
   workflow_dispatch:
 
 jobs:
