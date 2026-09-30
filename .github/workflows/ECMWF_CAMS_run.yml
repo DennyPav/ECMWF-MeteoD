@@ -63,7 +63,7 @@ jobs:
         run: |
           # Logica per determinare la cartella
           NOW_HOUR=$(date -u +%H)
-
+      
           if [ "$NOW_HOUR" -lt 7 ]; then
             DATE=$(date -u -d "yesterday" +%Y%m%d)
             RUN=12
@@ -74,17 +74,27 @@ jobs:
             DATE=$(date -u +%Y%m%d)
             RUN=12
           fi
-
+      
           RUN_FOLDER="${DATE}${RUN}"
-          LOCAL_DIR="./${RUN_FOLDER}"
+          LOCAL_ZIP="./${RUN_FOLDER}.zip"
           REMOTE_DIR="gd_personal:MeteoD/ECMWF/${RUN_FOLDER}"
-
-          echo "🚀 Starting upload for: $RUN_FOLDER"
-
+      
+          echo "🚀 Starting upload for: ${RUN_FOLDER}"
+          echo "📦 ZIP: ${LOCAL_ZIP}"
+      
+          # Controllo esistenza ZIP
+          if [ ! -f "$LOCAL_ZIP" ]; then
+            echo "❌ ZIP non trovato: $LOCAL_ZIP"
+            exit 1
+          fi
+      
           # Creazione cartella remota
           rclone mkdir "$REMOTE_DIR" || true
-
-          # Upload finale
-          rclone copy "$LOCAL_DIR" "$REMOTE_DIR" --drive-chunk-size 64M --ignore-existing --verbose
-
+      
+          # Upload del solo ZIP
+          rclone copyto "$LOCAL_ZIP" \
+            "$REMOTE_DIR/${RUN_FOLDER}.zip" \
+            --drive-chunk-size 64M \
+            --verbose
+      
           echo "✅ Upload Google Drive completato"
