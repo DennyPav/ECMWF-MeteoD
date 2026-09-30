@@ -758,9 +758,6 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
             
-            if s3_client:
-                upload_to_r2(s3_client, out_file, run_info["run_date"], run_info["run_hour"], os.path.basename(out_file))
-            
             processed += 1
             if processed % 50 == 0: print(f"{processed}...", end=" ", flush=True)
 
@@ -825,6 +822,23 @@ def main():
     
     # FASE 2: ESTERO (Processa Aria = False)
     process_unified_venues(VENUES_ESTERO, datasets, run_info, s3, tf, process_air=False)
+
+    # CREA UN UNICO ZIP CON TUTTI I JSON
+    zip_file = os.path.join(WORKDIR, f"{run_str}.zip")
+    
+    print(f"\n📦 Creazione ZIP: {zip_file}")
+    
+    with zipfile.ZipFile(
+        zip_file,
+        "w",
+        compression=zipfile.ZIP_DEFLATED
+    ) as z:
+        for filename in os.listdir(outdir):
+            if filename.endswith("_ecmwf.json"):
+                filepath = os.path.join(outdir, filename)
+                z.write(filepath, arcname=filename)
+    
+    print(f"✅ ZIP creato: {zip_file}")
 
     # Cleanup
     for d in datasets.values(): 
