@@ -755,10 +755,11 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
             safe_name = city.replace("'", " ").replace("/", "-")
             out_file = os.path.join(run_info["outdir"], f"{safe_name}_ecmwf.json")
             
-            with open(out_file, "w", encoding="utf-8") as f:
-                json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
-            
+            with open(out_file, "w", encoding="utf-8") as f: json.dump(city_data, f, separators=(",", ":"), ensure_ascii=False)
+            if s3_client: upload_to_r2(s3_client, out_file, run_info["run_date"], run_info["run_hour"])
             processed += 1
+
+
             if processed % 50 == 0: print(f"{processed}...", end=" ", flush=True)
 
         except Exception as e:
