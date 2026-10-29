@@ -1,6 +1,7 @@
 #!/bin/env python3
 
 import os
+import hashlib
 import json
 import sys
 import shutil
@@ -69,7 +70,7 @@ SEASON_THRESHOLDS = {
 # ============================================================================
 
 def get_r2_client():
-    if "INSERISCI_QUI" in R2_ACCESS_KEY or not R2_ACCESS_KEY:
+    if not R2_ACCESS_KEY or "INSERISCI_QUI" in R2_ACCESS_KEY:
         print("ATTENZIONE: Credenziali R2 non impostate.")
         return None
     return boto3.client('s3', endpoint_url=R2_ENDPOINT, aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET_KEY, region_name='auto')
@@ -91,8 +92,8 @@ def upload_to_r2(s3_client, local_file_path, run_date, run_hour, filename_overri
 
 def get_run_datetime_now_utc():
     now = datetime.now(timezone.utc)
-    if now.hour < 8: return (now - timedelta(days=1)).strftime("%Y%m%d"), "12"
-    elif now.hour < 20: return now.strftime("%Y%m%d"), "00"
+    if now.hour < 10: return (now - timedelta(days=1)).strftime("%Y%m%d"), "12"
+    elif now.hour < 22: return now.strftime("%Y%m%d"), "00"
     return now.strftime("%Y%m%d"), "12"
 
 # ---------------------- TUE FUNZIONI METEO ORIGINALI (INTATTE) ----------------------
@@ -116,28 +117,116 @@ def wet_bulb_celsius(t_c, rh_percent):
          - 4.686035
     return tw
 
-def convert_grib_to_nc_global(infile):
-    if os.path.exists(infile.replace(".grib", ".nc")): 
-        return infile.replace(".grib", ".nc")
-    
-    print(f"Conversione GRIB -> NC: {infile} ...")
-    
+def load_venue_coordinates():
+    """Ordine unico e stabile delle localita' dei due JSON."""
+    coordinates = []
+    site_lookup = {}
+    for venues_path in (VENUES_ITALIA, VENUES_ESTERO):
+        if not os.path.isfile(venues_path):
+            raise FileNotFoundError(f"File localita' non trovato: {venues_path}")
+        with open(venues_path, "r", encoding="utf-8") as f:
+            venues = json.load(f)
+        index = {}
+        for city, values in venues.items():
+            index[city] = len(coordinates)
+            coordinates.append((float(values[0]), float(values[1])))
+        site_lookup[os.path.basename(venues_path)] = index
+
+    if not coordinates:
+        raise ValueError("Nessuna localita' trovata nei JSON")
+    coordinates = np.asarray(coordinates, dtype=np.float64)
+    # Invalida i NetCDF in cache se cambiano coordinate, numero od ordine delle localita'.
+    signature = hashlib.sha256(coordinates.tobytes()).hexdigest()
+    return coordinates, site_lookup, signature
+
+
+def nearest_axis_indices(axis, target, circular=False):
+    """Indice del nodo piu' vicino su un asse 1D, incluse le longitudini 0/360."""
+    axis = np.asarray(axis, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if axis.ndim != 1 or len(axis) < 2:
+        raise ValueError("Attesa una griglia ECMWF regolare con assi 1D")
+
+    reverse = axis[0] > axis[-1]
+    sorted_axis = axis[::-1] if reverse else axis
+    if circular:
+        # La griglia puo' usare 0..360 oppure -180..180.
+        target = target % 360 if sorted_axis[0] >= 0 else (target + 180) % 360 - 180
+
+    insertion = np.searchsorted(sorted_axis, target)
+    left = np.clip(insertion - 1, 0, len(axis) - 1)
+    right = np.clip(insertion, 0, len(axis) - 1)
+
+    def distance(candidate):
+        d = np.abs(sorted_axis[candidate] - target)
+        return np.minimum(d, 360 - d) if circular else d
+
+    chosen = np.where(distance(left) <= distance(right), left, right)
+    if circular:
+        # Gestisce anche le citta' appena a ovest/est del meridiano di chiusura.
+        first = np.zeros_like(chosen)
+        last = np.full_like(chosen, len(axis) - 1)
+        chosen = np.where(distance(first) < distance(chosen), first, chosen)
+        chosen = np.where(distance(last) < distance(chosen), last, chosen)
+    return (len(axis) - 1 - chosen if reverse else chosen).astype(np.int32)
+
+
+def convert_grib_to_nc_global(infile, site_coordinates, site_signature):
+    """Converte solo i nodi necessari alle citta', non l'intera griglia globale."""
+    outfile = infile.replace(".grib", ".nc")
+    if os.path.isfile(outfile):
+        with xr.open_dataset(outfile) as cached:
+            if (cached.attrs.get("site_signature") == site_signature
+                    and cached.attrs.get("grid_resolution") == "0p1"
+                    and "site_to_point" in cached):
+                return outfile, cached["site_to_point"].values.astype(np.int32)
+        print(f"Cache NetCDF obsoleta, rigenerazione: {outfile}")
+
+    print(f"Conversione GRIB -> NC (solo nodi localita'): {infile} ...")
     try:
-        # Tentativo 1: Apertura standard
         ds = xr.open_dataset(infile, engine="cfgrib")
     except Exception as e:
-        # Tentativo 2: Se fallisce per i livelli multipli, forza il filtro surface
         if "typeOfLevel" in str(e):
-            print(f"⚠️ Rilevati livelli multipli in {os.path.basename(infile)}, filtro per 'surface'...")
-            ds = xr.open_dataset(infile, engine="cfgrib", 
-                                 backend_kwargs={'filter_by_keys': {'typeOfLevel': 'surface'}})
+            print(f"Livelli multipli in {os.path.basename(infile)}, filtro surface...")
+            ds = xr.open_dataset(
+                infile, engine="cfgrib",
+                backend_kwargs={"filter_by_keys": {"typeOfLevel": "surface"}}
+            )
         else:
-            raise e
+            raise
 
-    outfile = infile.replace(".grib", ".nc")
-    ds.to_netcdf(outfile) 
-    ds.close()
-    return outfile
+    try:
+        if not {"latitude", "longitude"}.issubset(ds.dims):
+            raise ValueError("Griglia non regolare: attese dimensioni latitude/longitude")
+
+        lat_idx = nearest_axis_indices(ds.latitude.values, site_coordinates[:, 0])
+        lon_idx = nearest_axis_indices(ds.longitude.values, site_coordinates[:, 1], circular=True)
+
+        # Ogni coppia (lat_idx, lon_idx) identifica un nodo: elimina i duplicati.
+        unique_grid_nodes, site_to_point = np.unique(
+            np.column_stack((lat_idx, lon_idx)), axis=0, return_inverse=True
+        )
+        subset = ds.isel(
+            latitude=xr.DataArray(unique_grid_nodes[:, 0], dims="point"),
+            longitude=xr.DataArray(unique_grid_nodes[:, 1], dims="point")
+        )
+        subset = subset.assign_coords(point=np.arange(len(unique_grid_nodes), dtype=np.int32))
+        subset["site_to_point"] = ("site", site_to_point.astype(np.int32))
+        subset.attrs["site_signature"] = site_signature
+        subset.attrs["grid_resolution"] = "0p1"
+
+        # File temporaneo per non lasciare una cache parziale in caso di errore.
+        tmp_outfile = outfile + ".part"
+        try:
+            subset.to_netcdf(tmp_outfile)
+            os.replace(tmp_outfile, outfile)
+        finally:
+            if os.path.exists(tmp_outfile):
+                os.remove(tmp_outfile)
+        print(f"Nodi salvati: {len(unique_grid_nodes)} su {len(site_coordinates)} localita'")
+        return outfile, site_to_point.astype(np.int32)
+    finally:
+        ds.close()
 
 def kelvin_to_celsius(k): return k - 273.15
 def mps_to_kmh(mps): return mps * 3.6
@@ -319,7 +408,7 @@ def clean_cams_data(df):
 # DOWNLOAD DATA
 # ============================================================================
 
-def download_data_unified(run_date, run_hour):
+def download_data_unified(run_date, run_hour, site_coordinates, site_signature):
     print(f"--- START DOWNLOAD: {run_date}{run_hour} ---")
     base_dir = f"{WORKDIR}/data_temp_0p1/{run_date}{run_hour}"
     os.makedirs(base_dir, exist_ok=True)
@@ -339,11 +428,13 @@ def download_data_unified(run_date, run_hour):
     files["main_esa"] = (f"{base_dir}/ecmwf_main_esa.grib", ["2t", "2d", "tcc", "msl", "tp", "mucape"], steps_esa)
     
     nc_files = {}
+    point_maps = {}
     for key, (path, params, steps) in files.items():
         if not os.path.exists(path) or os.path.getsize(path) < 1000:
             print(f"⬇️ ECMWF {key}...")
-            client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc", step=steps, param=params, levtype="sfc", target=path)
-        nc_files[key] = convert_grib_to_nc_global(path)
+            client.retrieve(date=run_date, time=int(run_hour), stream="oper", type="fc",
+                            step=steps, param=params, levtype="sfc", target=path)
+        nc_files[key], point_maps[key] = convert_grib_to_nc_global(path, site_coordinates, site_signature)
 
     # --- 2. CAMS (Solo se necessario per Italia) ---
     cams_zip = f"{base_dir}/cams.zip"
@@ -385,14 +476,14 @@ def download_data_unified(run_date, run_hour):
             cams_nc = None
 
     nc_files["cams"] = cams_nc
-    return nc_files
+    return nc_files, point_maps
 
 
 # ============================================================================
 # PROCESSING UNIFICATO (METEO ORIGINAL + CAMS)
 # ============================================================================
 
-def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instance, process_air=False):
+def process_unified_venues(venues_path, datasets, point_maps, site_lookup, run_info, s3_client, tf_instance, process_air=False):
     if not os.path.exists(venues_path): return
     with open(venues_path, 'r', encoding='utf-8') as f: venues_raw = json.load(f)
     
@@ -502,24 +593,25 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
                     })
                 return daily
 
-            # Indici griglia
-            lat_idx = np.abs(ds_main_tri.latitude - info['lat']).argmin()
-            lon_idx = np.abs(ds_main_tri.longitude - info['lon']).argmin()
-            lat_idx_esa = np.abs(ds_main_esa.latitude - info['lat']).argmin()
-            lon_idx_esa = np.abs(ds_main_esa.longitude - info['lon']).argmin()
+            # Ogni NetCDF contiene solo i nodi ECMWF usati dalle localita'.
+            site_id = site_lookup[os.path.basename(venues_path)][city]
+            idx_tri = int(point_maps["main_tri"][site_id])
+            idx_wind = int(point_maps["wind_tri"][site_id])
+            idx_orog = int(point_maps["orog"][site_id])
+            idx_esa = int(point_maps["main_esa"][site_id])
 
             # ----------------------
             # TRIORARIO RAW
             # ----------------------
-            t2m_k_tri = ds_main_tri["t2m"].isel(latitude=lat_idx, longitude=lon_idx).values
-            td2m_k_tri = ds_main_tri["d2m"].isel(latitude=lat_idx, longitude=lon_idx).values
-            tcc_tri = ds_main_tri["tcc"].isel(latitude=lat_idx, longitude=lon_idx).values * 100
-            msl_tri = ds_main_tri["msl"].isel(latitude=lat_idx, longitude=lon_idx).values / 100
-            tp_cum_tri = ds_main_tri["tp"].isel(latitude=lat_idx, longitude=lon_idx).values
-            mucape_tri = ds_main_tri["mucape"].isel(latitude=lat_idx, longitude=lon_idx).values
-            u10_tri = ds_wind_tri["u10"].isel(latitude=lat_idx, longitude=lon_idx).values
-            v10_tri = ds_wind_tri["v10"].isel(latitude=lat_idx, longitude=lon_idx).values
-            z_model = ds_orog["z"].isel(latitude=lat_idx, longitude=lon_idx).values / 9.81
+            t2m_k_tri = ds_main_tri["t2m"].isel(point=idx_tri).values
+            td2m_k_tri = ds_main_tri["d2m"].isel(point=idx_tri).values
+            tcc_tri = ds_main_tri["tcc"].isel(point=idx_tri).values * 100
+            msl_tri = ds_main_tri["msl"].isel(point=idx_tri).values / 100
+            tp_cum_tri = ds_main_tri["tp"].isel(point=idx_tri).values
+            mucape_tri = ds_main_tri["mucape"].isel(point=idx_tri).values
+            u10_tri = ds_wind_tri["u10"].isel(point=idx_wind).values
+            v10_tri = ds_wind_tri["v10"].isel(point=idx_wind).values
+            z_model = ds_orog["z"].isel(point=idx_orog).values / 9.81
 
             rh2m_tri = relative_humidity(t2m_k_tri, td2m_k_tri)
             t2m_c_tri = kelvin_to_celsius(t2m_k_tri)
@@ -593,12 +685,12 @@ def process_unified_venues(venues_path, datasets, run_info, s3_client, tf_instan
             # ----------------------
             # ESAORARIO RAW
             # ----------------------
-            t2m_k_esa = ds_main_esa["t2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-            td2m_k_esa = ds_main_esa["d2m"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-            tcc_esa = ds_main_esa["tcc"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values * 100
-            msl_esa = ds_main_esa["msl"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values / 100
-            tp_cum_esa = ds_main_esa["tp"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
-            mucape_esa = ds_main_esa["mucape"].isel(latitude=lat_idx_esa, longitude=lon_idx_esa).values
+            t2m_k_esa = ds_main_esa["t2m"].isel(point=idx_esa).values
+            td2m_k_esa = ds_main_esa["d2m"].isel(point=idx_esa).values
+            tcc_esa = ds_main_esa["tcc"].isel(point=idx_esa).values * 100
+            msl_esa = ds_main_esa["msl"].isel(point=idx_esa).values / 100
+            tp_cum_esa = ds_main_esa["tp"].isel(point=idx_esa).values
+            mucape_esa = ds_main_esa["mucape"].isel(point=idx_esa).values
 
             rh2m_esa = relative_humidity(t2m_k_esa, td2m_k_esa)
             t2m_c_esa = kelvin_to_celsius(t2m_k_esa)
@@ -777,8 +869,9 @@ def main():
     run_str = f"{rd}{rh}"
     print(f"--- RUN: {run_str} ---")
     
-    # 1. DOWNLOAD ALL
-    files = download_data_unified(rd, rh)
+    # 1. Coordinate dei due JSON + download ed estrazione dei nodi utili
+    site_coordinates, site_lookup, site_signature = load_venue_coordinates()
+    files, point_maps = download_data_unified(rd, rh, site_coordinates, site_signature)
     
     # 2. SETUP
     tf = TimezoneFinder(in_memory=True)
@@ -801,7 +894,7 @@ def main():
         }
         
         # Prep CAMS
-        if datasets["cams"]:
+        if datasets["cams"] is not None:
             rn = {}
             for v in datasets["cams"].data_vars:
                 if "pm2p5" in v: rn[v] = "pm25"
@@ -819,10 +912,10 @@ def main():
     # 4. PROCESS LOOPS
     
     # FASE 1: ITALIA (Processa Aria = True)
-    process_unified_venues(VENUES_ITALIA, datasets, run_info, s3, tf, process_air=True)
+    process_unified_venues(VENUES_ITALIA, datasets, point_maps, site_lookup, run_info, s3, tf, process_air=True)
     
     # FASE 2: ESTERO (Processa Aria = False)
-    process_unified_venues(VENUES_ESTERO, datasets, run_info, s3, tf, process_air=False)
+    process_unified_venues(VENUES_ESTERO, datasets, point_maps, site_lookup, run_info, s3, tf, process_air=False)
 
     # CREA UN UNICO ZIP CON TUTTI I JSON
     zip_file = os.path.join(WORKDIR, f"{run_str}.zip")
@@ -842,8 +935,8 @@ def main():
     print(f"✅ ZIP creato: {zip_file}")
 
     # Cleanup
-    for d in datasets.values(): 
-        if d: d.close()
+    for d in datasets.values():
+        if d is not None: d.close()
     
     # Opzionale:
     # shutil.rmtree(f"{WORKDIR}/data_temp/{run_str}")
