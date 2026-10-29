@@ -92,8 +92,8 @@ def upload_to_r2(s3_client, local_file_path, run_date, run_hour, filename_overri
 
 def get_run_datetime_now_utc():
     now = datetime.now(timezone.utc)
-    if now.hour < 10: return (now - timedelta(days=1)).strftime("%Y%m%d"), "12"
-    elif now.hour < 22: return now.strftime("%Y%m%d"), "00"
+    if now.hour < 8: return (now - timedelta(days=1)).strftime("%Y%m%d"), "12"
+    elif now.hour < 20: return now.strftime("%Y%m%d"), "00"
     return now.strftime("%Y%m%d"), "12"
 
 # ---------------------- TUE FUNZIONI METEO ORIGINALI (INTATTE) ----------------------
